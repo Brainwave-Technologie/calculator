@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const API_URL = import.meta.env.VITE_BACKEND_URL 
 
 const ResourceLoginActivity = () => {
   const [resources, setResources] = useState([]);
@@ -24,7 +24,7 @@ const ResourceLoginActivity = () => {
     try {
       setLoading(true);
       const response = await axios.get(
-        `${API_URL}/resources/login-activity?sort_by=${sortBy}&sort_order=${sortOrder}`,
+        `${API_URL}/resource/login-activity?sort_by=${sortBy}&sort_order=${sortOrder}`,
         getAuthHeaders()
       );
       setResources(response.data.resources);

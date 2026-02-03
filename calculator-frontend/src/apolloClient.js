@@ -4,7 +4,7 @@ import { ApolloLink } from '@apollo/client';
 import { ErrorLink } from '@apollo/client/link/error';
 
 const httpLink =new HttpLink({
-  uri: import.meta.env.VITE_GRAPHQL_URL || 'http://localhost:4000/graphql',
+  uri: import.meta.env.VITE_GRAPHQL_URL ,
   credentials: 'include'
 });
 

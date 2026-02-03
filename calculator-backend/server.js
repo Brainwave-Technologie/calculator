@@ -54,7 +54,7 @@ app.use('/api/allocation', require('./routes/allocation-upload.routes'));
 //MRO data handling
 // app.use('/api/mro-allocation', require('./routes/mro-allocation.routes'));
 
-
+app.use('/api/admin', require('./routes/adminroutes/admin-resource-cases.routes'));
 const mroAllocRoutes = require('./routes/allocation routes/mro-daily-allocations.routes');
 const verismaAllocRoutes = require('./routes/allocation routes/verisma-daily-allocations.routes');
 const datavantAllocRoutes = require('./routes/allocation routes/datavant-daily-allocations.routes');

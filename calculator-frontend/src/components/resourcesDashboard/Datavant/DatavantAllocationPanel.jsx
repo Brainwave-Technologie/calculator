@@ -1,29 +1,57 @@
-// src/components/resourcesDashboard/Datavant/DatavantAllocationPanel.jsx
-// Pre-populated table rows with inline editing and per-row submit
+// src/components/DatavantAllocationPanel.jsx
+// Fixed: Uses date-filtered locations based on assigned_date
 import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const API_URL = import.meta.env.VITE_BACKEND_URL;
 
 // Datavant Dropdown Options
-const REQUEST_TYPES = ['', 'Data Request', 'Verification', 'Update', 'New Entry'];
+const DATAVANT_REQUEST_TYPES = ['New Request', 'Follow up'];
+const DATAVANT_TASK_TYPES = ['Data Entry', 'QA', 'Verification', 'Processing', 'Other'];
 
-const DatavantAllocationPanel = ({ locations, selectedDate, resourceInfo, geographyId, geographyName, allocations, onRefresh, loading }) => {
-  const [submittingRows, setSubmittingRows] = useState({});
-  const [rowData, setRowData] = useState({});
+const DatavantAllocationPanel = ({ 
+  locations = [],
+  selectedDate, 
+  resourceInfo, 
+  geographyId,
+  geographyName,
+  allocations = [],
+  onRefresh,
+  loading 
+}) => {
+  const [formData, setFormData] = useState({
+    subproject_id: '',
+    request_id: '',
+    request_type: '',
+    task_type: '',
+    count: 1
+  });
+  
+  const [submitting, setSubmitting] = useState(false);
+  const [requestIdWarning, setRequestIdWarning] = useState(null);
+  const [selectedLocationInfo, setSelectedLocationInfo] = useState(null);
+  
+  const [editingId, setEditingId] = useState(null);
+  const [editData, setEditData] = useState({});
+  const [changeReason, setChangeReason] = useState('');
+  
+  const [showDeleteModal, setShowDeleteModal] = useState(null);
+  const [deleteReason, setDeleteReason] = useState('');
 
   const getAuthHeaders = () => ({
     headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
   });
 
-  // Flatten locations
-  const locationRows = useMemo(() => {
-    const rows = [];
+  // Flatten locations (already date-filtered from parent)
+  const allAssignedLocations = useMemo(() => {
+    const locs = [];
     locations.forEach(assignment => {
       assignment.subprojects?.forEach(sp => {
-        rows.push({
+        locs.push({
           subproject_id: sp.subproject_id,
           subproject_name: sp.subproject_name,
+          subproject_key: sp.subproject_key,
+          assigned_date: sp.assigned_date,
           project_id: assignment.project_id,
           project_name: assignment.project_name,
           client_id: assignment.client_id,
@@ -33,246 +61,316 @@ const DatavantAllocationPanel = ({ locations, selectedDate, resourceInfo, geogra
         });
       });
     });
-    return rows;
+    return locs;
   }, [locations]);
 
-  // Initialize row data
-  useEffect(() => {
-    const initialData = {};
-    locationRows.forEach(loc => {
-      if (!rowData[loc.subproject_id]) {
-        initialData[loc.subproject_id] = {
-          request_type: '',
-          data_source: '',
-          record_count: 1,
-          remark: ''
-        };
-      }
-    });
-    if (Object.keys(initialData).length > 0) {
-      setRowData(prev => ({ ...prev, ...initialData }));
-    }
-  }, [locationRows]);
+  // Filter out already logged locations
+  const availableLocations = useMemo(() => {
+    const loggedSubprojectIds = new Set(allocations.map(a => a.subproject_id?.toString()));
+    return allAssignedLocations.filter(loc => !loggedSubprojectIds.has(loc.subproject_id?.toString()));
+  }, [allAssignedLocations, allocations]);
 
-  const handleRowChange = (subprojectId, field, value) => {
-    setRowData(prev => ({
-      ...prev,
-      [subprojectId]: { ...prev[subprojectId], [field]: value }
-    }));
+  // Date validation
+  const dateValidation = useMemo(() => {
+    if (!selectedDate) return { valid: false, message: 'No date selected' };
+    const selected = new Date(selectedDate);
+    const today = new Date();
+    selected.setHours(0, 0, 0, 0);
+    today.setHours(0, 0, 0, 0);
+    
+    if (selected > today) return { valid: false, message: 'Cannot log entries for future dates' };
+    
+    const lastDayOfMonth = new Date(selected.getFullYear(), selected.getMonth() + 1, 0);
+    lastDayOfMonth.setHours(23, 59, 59, 999);
+    if (new Date() > lastDayOfMonth) return { valid: false, message: 'This month is locked' };
+    
+    return { valid: true };
+  }, [selectedDate]);
+
+  const handleLocationChange = (subprojectId) => {
+    const location = availableLocations.find(l => l.subproject_id === subprojectId);
+    setSelectedLocationInfo(location);
+    setFormData(prev => ({ ...prev, subproject_id: subprojectId }));
   };
 
-  const handleSubmitRow = async (location) => {
-    const data = rowData[location.subproject_id];
-    
-    if (!data?.request_type) {
-      alert('Please select Request Type');
+  // Check Request ID
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (formData.request_id && formData.request_type === 'New Request') {
+        checkRequestId(formData.request_id);
+      } else {
+        setRequestIdWarning(null);
+      }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [formData.request_id, formData.request_type]);
+
+  const checkRequestId = async (requestId) => {
+    try {
+      const response = await axios.get(`${API_URL}/datavant-daily-allocations/check-request-id`, {
+        ...getAuthHeaders(),
+        params: { request_id: requestId }
+      });
+      if (response.data.exists) {
+        setRequestIdWarning({ message: 'Request ID exists', suggested_type: response.data.suggested_type });
+      } else {
+        setRequestIdWarning(null);
+      }
+    } catch (err) {}
+  };
+
+  const handleSubmit = async () => {
+    if (!formData.subproject_id) {
+      alert('Please select a Location');
       return;
     }
-
-    setSubmittingRows(prev => ({ ...prev, [location.subproject_id]: true }));
-
-    try {
-      await axios.post(
-        `${API_URL}/datavant-daily-allocations`,
-        {
-          subproject_id: location.subproject_id,
-          request_type: data.request_type,
-          data_source: data.data_source || '',
-          record_count: parseInt(data.record_count) || 1,
-          remark: data.remark || '',
-          allocation_date: selectedDate,
-          geography_id: geographyId,
-          geography_name: geographyName
-        },
-        getAuthHeaders()
-      );
-
-      setRowData(prev => ({
-        ...prev,
-        [location.subproject_id]: { request_type: '', data_source: '', record_count: 1, remark: '' }
-      }));
-
-      onRefresh();
-    } catch (err) {
-      alert(err.response?.data?.message || 'Failed to add entry');
-    } finally {
-      setSubmittingRows(prev => ({ ...prev, [location.subproject_id]: false }));
+    if (!dateValidation.valid) {
+      alert(dateValidation.message);
+      return;
     }
-  };
-
-  const handleDelete = async (id) => {
-    if (!window.confirm('Delete this entry?')) return;
     
+    setSubmitting(true);
     try {
-      await axios.delete(`${API_URL}/datavant-daily-allocations/${id}`, getAuthHeaders());
-      onRefresh();
-    } catch (error) {
-      alert(error.response?.data?.message || 'Failed to delete');
+      await axios.post(`${API_URL}/datavant-daily-allocations`, {
+        subproject_id: formData.subproject_id,
+        allocation_date: selectedDate,
+        request_id: formData.request_id,
+        request_type: formData.request_type,
+        task_type: formData.task_type,
+        count: formData.count || 1,
+        geography_id: selectedLocationInfo?.geography_id || geographyId,
+        geography_name: selectedLocationInfo?.geography_name || geographyName
+      }, getAuthHeaders());
+      
+      setFormData({ subproject_id: '', request_id: '', request_type: '', task_type: '', count: 1 });
+      setSelectedLocationInfo(null);
+      setRequestIdWarning(null);
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to create entry');
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  const formatDate = (dateString) => {
-    if (!dateString) return '-';
-    return new Date(dateString).toLocaleDateString('en-GB', { 
-      day: 'numeric', month: 'short', year: '2-digit' 
+  const startEdit = (allocation) => {
+    setEditingId(allocation._id);
+    setEditData({
+      request_id: allocation.request_id || '',
+      request_type: allocation.request_type || '',
+      task_type: allocation.task_type || '',
+      count: allocation.count || 1
     });
+    setChangeReason('');
   };
 
-  // Count totals
-  const totalRecords = allocations.reduce((sum, a) => sum + (a.record_count || 1), 0);
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditData({});
+    setChangeReason('');
+  };
+
+  const saveEdit = async () => {
+    if (!changeReason.trim()) {
+      alert('Please enter a change reason');
+      return;
+    }
+    try {
+      await axios.put(`${API_URL}/datavant-daily-allocations/${editingId}`, {
+        ...editData,
+        change_reason: changeReason
+      }, getAuthHeaders());
+      cancelEdit();
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to update');
+    }
+  };
+
+  const submitDeleteRequest = async () => {
+    if (!deleteReason.trim()) return;
+    try {
+      await axios.post(`${API_URL}/datavant-daily-allocations/${showDeleteModal}/request-delete`, {
+        delete_reason: deleteReason
+      }, getAuthHeaders());
+      setShowDeleteModal(null);
+      setDeleteReason('');
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed');
+    }
+  };
+
+  const isEntryLocked = (allocation) => {
+    if (allocation.is_locked) return true;
+    const allocDate = new Date(allocation.allocation_date);
+    const lastDayOfMonth = new Date(allocDate.getFullYear(), allocDate.getMonth() + 1, 0);
+    return new Date() > lastDayOfMonth;
+  };
+
+  const stats = useMemo(() => ({
+    pending: availableLocations.length,
+    todaysEntries: allocations.length,
+    totalAssigned: allAssignedLocations.length
+  }), [availableLocations, allocations, allAssignedLocations]);
 
   return (
     <div className="space-y-4">
-      {/* Stats Row */}
-      <div className="flex gap-4 text-xs">
-        <div className="bg-purple-50 border border-purple-200 px-3 py-1.5 rounded">
-          <span className="text-purple-700">Entries: <strong>{allocations.length}</strong></span>
-        </div>
-        <div className="bg-gray-50 border border-gray-200 px-3 py-1.5 rounded">
-          <span className="text-gray-700">Total Records: <strong>{totalRecords}</strong></span>
-        </div>
+      {/* Stats */}
+      <div className="flex flex-wrap gap-3">
+        <div className="px-3 py-1.5 bg-orange-100 text-orange-700 rounded text-xs font-medium">Pending: {stats.pending}</div>
+        <div className="px-3 py-1.5 bg-purple-100 text-purple-700 rounded text-xs font-medium">Today's Entries: {stats.todaysEntries}</div>
+        <div className="px-3 py-1.5 bg-gray-100 text-gray-700 rounded text-xs font-medium">Assigned (for date): {stats.totalAssigned}</div>
       </div>
 
-      {/* Entry Table */}
-      <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
-        <div className="px-4 py-2 bg-purple-700 text-white">
-          <h3 className="text-sm font-semibold">Add New Entry</h3>
-        </div>
-
-        <div className="overflow-x-auto">
-          <table className="min-w-full text-xs">
-            <thead className="bg-gray-100 text-gray-700">
-              <tr>
-                <th className="px-2 py-2 text-left font-semibold border-r">Location</th>
-                <th className="px-2 py-2 text-left font-semibold border-r">Request Type</th>
-                <th className="px-2 py-2 text-left font-semibold border-r">Data Source</th>
-                <th className="px-2 py-2 text-center font-semibold border-r w-20">Record Count</th>
-                <th className="px-2 py-2 text-left font-semibold border-r">Remark</th>
-                <th className="px-2 py-2 text-center font-semibold w-16">Action</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {locationRows.map((loc, idx) => {
-                const data = rowData[loc.subproject_id] || {};
-                const isSubmitting = submittingRows[loc.subproject_id];
-                const canSubmit = !!data.request_type;
-                
-                return (
-                  <tr key={loc.subproject_id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                    <td className="px-2 py-1.5 font-medium text-gray-900 border-r">
-                      <div className="max-w-[140px] truncate" title={loc.subproject_name}>
-                        {loc.subproject_name}
-                      </div>
-                    </td>
-                    <td className="px-1 py-1 border-r">
-                      <select
-                        value={data.request_type || ''}
-                        onChange={(e) => handleRowChange(loc.subproject_id, 'request_type', e.target.value)}
-                        className="w-full px-1 py-1 text-xs border border-gray-200 rounded focus:ring-1 focus:ring-purple-500"
-                      >
-                        {REQUEST_TYPES.map(type => (
-                          <option key={type} value={type}>{type || '--'}</option>
-                        ))}
-                      </select>
-                    </td>
-                    <td className="px-1 py-1 border-r">
-                      <input
-                        type="text"
-                        value={data.data_source || ''}
-                        onChange={(e) => handleRowChange(loc.subproject_id, 'data_source', e.target.value)}
-                        className="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:ring-1 focus:ring-purple-500"
-                        placeholder="source"
-                      />
-                    </td>
-                    <td className="px-1 py-1 border-r">
-                      <input
-                        type="number"
-                        min="1"
-                        value={data.record_count || 1}
-                        onChange={(e) => handleRowChange(loc.subproject_id, 'record_count', e.target.value)}
-                        className="w-full px-1 py-1 text-xs border border-gray-200 rounded text-center focus:ring-1 focus:ring-purple-500"
-                      />
-                    </td>
-                    <td className="px-1 py-1 border-r">
-                      <input
-                        type="text"
-                        value={data.remark || ''}
-                        onChange={(e) => handleRowChange(loc.subproject_id, 'remark', e.target.value)}
-                        className="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:ring-1 focus:ring-purple-500"
-                        placeholder="remark"
-                      />
-                    </td>
-                    <td className="px-1 py-1 text-center">
-                      <button
-                        onClick={() => handleSubmitRow(loc)}
-                        disabled={isSubmitting || !canSubmit}
-                        className={`px-2 py-1 text-[10px] font-medium rounded transition ${
-                          isSubmitting || !canSubmit
-                            ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                            : 'bg-purple-600 text-white hover:bg-purple-700'
-                        }`}
-                      >
-                        {isSubmitting ? '...' : 'Submit'}
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Submitted Entries Table */}
-      {allocations.length > 0 && (
-        <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
-          <div className="px-4 py-2 bg-gray-50 border-b flex justify-between items-center">
-            <h3 className="text-sm font-semibold text-gray-700">Submitted Entries</h3>
-            <span className="text-xs text-gray-500">{allocations.length} records</span>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-xs">
-              <thead className="bg-purple-700 text-white">
-                <tr>
-                  <th className="px-2 py-2 text-left font-medium border-r border-purple-600">SR#</th>
-                  <th className="px-2 py-2 text-left font-medium border-r border-purple-600">Allocation Date</th>
-                  <th className="px-2 py-2 text-left font-medium border-r border-purple-600">Resource Name</th>
-                  <th className="px-2 py-2 text-left font-medium border-r border-purple-600">Location</th>
-                  <th className="px-2 py-2 text-left font-medium border-r border-purple-600">Request Type</th>
-                  <th className="px-2 py-2 text-left font-medium border-r border-purple-600">Data Source</th>
-                  <th className="px-2 py-2 text-center font-medium border-r border-purple-600">Records</th>
-                  <th className="px-2 py-2 text-left font-medium border-r border-purple-600">Remark</th>
-                  <th className="px-2 py-2 text-center font-medium w-12">Del</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {allocations.map((alloc, idx) => (
-                  <tr key={alloc._id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                    <td className="px-2 py-1.5 font-medium border-r">{alloc.sr_no}</td>
-                    <td className="px-2 py-1.5 text-gray-600 border-r">{formatDate(alloc.allocation_date)}</td>
-                    <td className="px-2 py-1.5 border-r">{alloc.resource_name}</td>
-                    <td className="px-2 py-1.5 border-r">{alloc.subproject_name}</td>
-                    <td className="px-2 py-1.5 border-r">{alloc.request_type}</td>
-                    <td className="px-2 py-1.5 border-r">{alloc.data_source || '-'}</td>
-                    <td className="px-2 py-1.5 text-center font-medium border-r">{alloc.record_count || 1}</td>
-                    <td className="px-2 py-1.5 text-gray-500 border-r">{alloc.remark || '-'}</td>
-                    <td className="px-2 py-1.5 text-center">
-                      {!alloc.is_locked ? (
-                        <button onClick={() => handleDelete(alloc._id)} className="text-red-500 hover:text-red-700">✕</button>
-                      ) : (
-                        <span className="text-gray-300">-</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      {allAssignedLocations.length === 0 && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-yellow-800">
+          <p className="text-sm font-medium">⚠️ No locations available for this date</p>
+          <p className="text-xs mt-1">Locations can only be logged from their assignment date onwards.</p>
         </div>
       )}
 
-      {loading && <div className="text-center py-4 text-gray-500 text-xs">Loading...</div>}
+      {!dateValidation.valid && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-sm">⚠️ {dateValidation.message}</div>
+      )}
+
+      {/* Add Entry Form */}
+      <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
+        <div className="px-4 py-2 bg-purple-600 text-white"><h3 className="text-sm font-semibold">✨ Add New Entry</h3></div>
+        <div className="p-4">
+          {availableLocations.length === 0 && allAssignedLocations.length > 0 ? (
+            <div className="text-center py-4 text-gray-500 text-sm">✅ All locations logged for this date</div>
+          ) : allAssignedLocations.length === 0 ? (
+            <div className="text-center py-4 text-yellow-600 text-sm">⚠️ No locations assigned for this date</div>
+          ) : !dateValidation.valid ? (
+            <div className="text-center py-4 text-red-500 text-sm">⚠️ {dateValidation.message}</div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Date</label>
+                  <input type="text" value={selectedDate} readOnly className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded bg-gray-50" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Location <span className="text-red-500">*</span></label>
+                  <select value={formData.subproject_id} onChange={(e) => handleLocationChange(e.target.value)} className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded">
+                    <option value="">-- Select --</option>
+                    {availableLocations.map(loc => <option key={loc.subproject_id} value={loc.subproject_id}>{loc.subproject_name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Request ID</label>
+                  <input type="text" value={formData.request_id} onChange={(e) => setFormData(prev => ({ ...prev, request_id: e.target.value }))} className={`w-full px-2 py-1.5 text-xs border rounded ${requestIdWarning ? 'border-yellow-400 bg-yellow-50' : 'border-gray-300'}`} />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Request Type</label>
+                  <select value={formData.request_type} onChange={(e) => setFormData(prev => ({ ...prev, request_type: e.target.value }))} className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded">
+                    <option value="">-- Select --</option>
+                    {DATAVANT_REQUEST_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Task Type</label>
+                  <select value={formData.task_type} onChange={(e) => setFormData(prev => ({ ...prev, task_type: e.target.value }))} className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded">
+                    <option value="">-- Select --</option>
+                    {DATAVANT_TASK_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Count</label>
+                  <input type="number" min="1" value={formData.count} onChange={(e) => setFormData(prev => ({ ...prev, count: parseInt(e.target.value) || 1 }))} className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded" />
+                </div>
+                <div className="flex items-end">
+                  <button onClick={handleSubmit} disabled={submitting || !formData.subproject_id || !dateValidation.valid} className="w-full px-4 py-1.5 bg-purple-600 text-white text-xs font-medium rounded hover:bg-purple-700 disabled:bg-gray-300">
+                    {submitting ? 'Submitting...' : 'Submit'}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Entries Table */}
+      <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
+        <div className="px-4 py-2 bg-gray-700 text-white flex justify-between">
+          <h3 className="text-sm font-semibold">📋 Entries for {selectedDate}</h3>
+          <span className="text-xs bg-gray-600 px-2 py-0.5 rounded">{allocations.length}</span>
+        </div>
+        {loading ? (
+          <div className="p-4 text-center text-gray-500">Loading...</div>
+        ) : allocations.length === 0 ? (
+          <div className="p-4 text-center text-gray-500 text-sm">No entries</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-xs">
+              <thead className="bg-gray-100">
+                <tr>
+                  <th className="px-2 py-2 text-left border-r">SR#</th>
+                  <th className="px-2 py-2 text-left border-r">Location</th>
+                  <th className="px-2 py-2 text-left border-r">Request ID</th>
+                  <th className="px-2 py-2 text-left border-r">Request Type</th>
+                  <th className="px-2 py-2 text-left border-r">Task Type</th>
+                  <th className="px-2 py-2 text-center border-r">Count</th>
+                  <th className="px-2 py-2 text-center w-24">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {allocations.map((alloc, idx) => {
+                  const isEditing = editingId === alloc._id;
+                  const locked = isEntryLocked(alloc);
+                  return (
+                    <React.Fragment key={alloc._id}>
+                      <tr className={`${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'} ${isEditing ? 'bg-yellow-50' : ''}`}>
+                        <td className="px-2 py-1.5 border-r">{alloc.sr_no}</td>
+                        <td className="px-2 py-1.5 border-r font-medium">{alloc.subproject_name}</td>
+                        <td className="px-1 py-1 border-r">{isEditing ? <input type="text" value={editData.request_id} onChange={(e) => setEditData(prev => ({ ...prev, request_id: e.target.value }))} className="w-full px-1 py-0.5 text-xs border border-yellow-400 rounded" /> : (alloc.request_id || '-')}</td>
+                        <td className="px-1 py-1 border-r">{isEditing ? <select value={editData.request_type} onChange={(e) => setEditData(prev => ({ ...prev, request_type: e.target.value }))} className="w-full px-1 py-0.5 text-xs border border-yellow-400 rounded"><option value="">--</option>{DATAVANT_REQUEST_TYPES.map(t => <option key={t} value={t}>{t}</option>)}</select> : (alloc.request_type || '-')}</td>
+                        <td className="px-1 py-1 border-r">{isEditing ? <select value={editData.task_type} onChange={(e) => setEditData(prev => ({ ...prev, task_type: e.target.value }))} className="w-full px-1 py-0.5 text-xs border border-yellow-400 rounded"><option value="">--</option>{DATAVANT_TASK_TYPES.map(t => <option key={t} value={t}>{t}</option>)}</select> : (alloc.task_type || '-')}</td>
+                        <td className="px-1 py-1 text-center border-r">{isEditing ? <input type="number" min="1" value={editData.count} onChange={(e) => setEditData(prev => ({ ...prev, count: parseInt(e.target.value) || 1 }))} className="w-16 px-1 py-0.5 text-xs border border-yellow-400 rounded text-center" /> : alloc.count}</td>
+                        <td className="px-2 py-1.5 text-center">
+                          {locked ? <span className="text-gray-400 text-[10px]">🔒</span> : isEditing ? (
+                            <div className="flex gap-1 justify-center">
+                              <button onClick={saveEdit} className="px-1.5 py-0.5 text-[10px] bg-green-500 text-white rounded">Save</button>
+                              <button onClick={cancelEdit} className="px-1.5 py-0.5 text-[10px] bg-gray-400 text-white rounded">Cancel</button>
+                            </div>
+                          ) : (
+                            <div className="flex gap-1 justify-center">
+                              <button onClick={() => startEdit(alloc)} className="px-1.5 py-0.5 text-[10px] bg-blue-500 text-white rounded">Edit</button>
+                              <button onClick={() => setShowDeleteModal(alloc._id)} className="px-1.5 py-0.5 text-[10px] bg-red-500 text-white rounded">Del</button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                      {isEditing && (
+                        <tr className="bg-yellow-50">
+                          <td colSpan={7} className="px-4 py-2">
+                            <label className="text-xs font-medium text-yellow-800">Change Reason <span className="text-red-500">*</span></label>
+                            <input type="text" value={changeReason} onChange={(e) => setChangeReason(e.target.value)} className="w-full mt-1 px-2 py-1.5 text-xs border border-yellow-400 rounded" placeholder="Why?" />
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {showDeleteModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-96 p-4">
+            <h3 className="text-sm font-semibold mb-3">Request Deletion</h3>
+            <textarea value={deleteReason} onChange={(e) => setDeleteReason(e.target.value)} className="w-full px-3 py-2 text-xs border rounded" rows={3} placeholder="Delete reason (required)" />
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => { setShowDeleteModal(null); setDeleteReason(''); }} className="px-3 py-1.5 text-xs bg-gray-200 rounded">Cancel</button>
+              <button onClick={submitDeleteRequest} disabled={!deleteReason.trim()} className="px-3 py-1.5 text-xs bg-red-500 text-white rounded disabled:bg-red-300">Submit</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

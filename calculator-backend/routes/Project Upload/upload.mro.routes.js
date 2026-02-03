@@ -1,6 +1,4 @@
-// routes/upload-mro.routes.js - MRO-specific Bulk Upload for Project Hierarchy
-// Supports: Processing, Logging, MRO Payer Project
-
+// routes/upload-mro.routes.js - MRO-specific Bulk Upload with UPSERT logic (preserves IDs)
 const express = require("express");
 const router = express.Router();
 const multer = require("multer");
@@ -26,49 +24,50 @@ function normalizeName(name) {
 // ============================================
 // MRO CONSTANTS
 // ============================================
-
-// MRO Process Types (Projects)
 const MRO_PROCESS_TYPES = ['Processing', 'Logging', 'MRO Payer Project'];
 
-// MRO Request Types (apply to all process types)
 const MRO_REQUEST_TYPES = [
-  'Batch',
-  'DDS',
-  'E-link',
-  'E-Request',
-  'Follow up',
-  'New Request'
+  'Batch', 'DDS', 'E-link', 'E-Request', 'Follow up', 'New Request'
 ];
 
-// MRO Requestor Types (for Processing - determines pricing)
 const MRO_REQUESTOR_TYPES = [
   'NRS-NO Records',
+  'Manual',
   'Other Processing (Canceled/Released By Other)',
   'Processed',
   'Processed through File Drop'
 ];
 
-// Default pricing
 const MRO_DEFAULT_PRICING = {
   'Processing': {
     'NRS-NO Records': 2.25,
     'Other Processing (Canceled/Released By Other)': 0,
     'Processed': 0,
     'Processed through File Drop': 0,
-    'Manual': 3.00  // Legacy/alternate
+    'Manual': 3.00
   },
   'Logging': {
     'flatrate': 1.08
   },
   'MRO Payer Project': {
-    'flatrate': 0  // Define your rate
+    'flatrate': 0
   }
 };
 
-const BATCH_SIZE = 500;
+// ============================================
+// HELPER: Generate business key
+// ============================================
+function generateBusinessKey(clientName, projectName, subprojectName) {
+  return [
+    (clientName || '').toLowerCase().trim(),
+    (projectName || '').toLowerCase().trim(),
+    (subprojectName || '').toLowerCase().trim()
+  ].join('|');
+}
 
 // =============================================
-// MRO BULK UPLOAD - Creates hierarchy with MRO-specific structure
+// MRO BULK UPLOAD - UPSERT MODE
+// Preserves existing IDs, updates rates/assignments
 // =============================================
 router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded" });
@@ -77,7 +76,7 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
   const rows = [];
 
   try {
-    console.log("⏱️ MRO Bulk Upload started...");
+    console.log("⏱️ MRO Bulk Upload (UPSERT mode) started...");
 
     // 1. Read CSV
     await new Promise((resolve, reject) => {
@@ -89,14 +88,12 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
               if (h.includes("geography")) return "geography";
               if (h.includes("location") || h.includes("subproject")) return "location";
               if (h.includes("process") && h.includes("type")) return "process_type";
-              // Requestor type rates
               if (h.includes("nrs") && h.includes("rate")) return "nrs_rate";
               if (h.includes("other") && h.includes("rate")) return "other_processing_rate";
               if (h === "processed rate" || h === "processed_rate") return "processed_rate";
               if (h.includes("file drop") && h.includes("rate")) return "file_drop_rate";
               if (h.includes("manual") && h.includes("rate")) return "manual_rate";
-              // Flat rate for Logging/Payer
-              if (h === "flatrate" || h === "flat rate" || h.includes("logging") && h.includes("rate")) return "flatrate";
+              if (h === "flatrate" || h === "flat rate" || (h.includes("logging") && h.includes("rate"))) return "flatrate";
               return header;
             },
           })
@@ -121,7 +118,6 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
       const location = norm(r.location);
       let process_type = norm(r.process_type);
       
-      // Parse all rates
       const nrs_rate = parseFloat(r.nrs_rate) || MRO_DEFAULT_PRICING.Processing['NRS-NO Records'];
       const other_processing_rate = parseFloat(r.other_processing_rate) || 0;
       const processed_rate = parseFloat(r.processed_rate) || 0;
@@ -147,7 +143,6 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
       if (!location) rowErrors.push("Location required");
       if (!process_type) rowErrors.push("Process Type required");
 
-      // Validate process type
       const matchedProcessType = MRO_PROCESS_TYPES.find(
         (t) => t.toLowerCase() === process_type.toLowerCase()
       );
@@ -157,7 +152,6 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
         rowOut.process_type = matchedProcessType;
       }
 
-      // Check for duplicates in CSV
       const uniqueKey = `${normalizeName(geography)}|${normalizeName(process_type)}|${normalizeName(location)}`;
       if (csvDuplicateCheck.has(uniqueKey)) {
         rowErrors.push("Duplicate entry in CSV");
@@ -192,19 +186,13 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
       const subKey = normalizeName(r.location);
 
       if (!geographyMap.has(geoKey)) {
-        geographyMap.set(geoKey, {
-          name: r.geography,
-          projects: new Map()
-        });
+        geographyMap.set(geoKey, { name: r.geography, projects: new Map() });
       }
 
       const geography = geographyMap.get(geoKey);
 
       if (!geography.projects.has(projKey)) {
-        geography.projects.set(projKey, {
-          name: r.process_type,
-          subprojects: new Map()
-        });
+        geography.projects.set(projKey, { name: r.process_type, subprojects: new Map() });
       }
 
       const project = geography.projects.get(projKey);
@@ -224,18 +212,20 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
 
     console.log(`📊 Found ${geographyMap.size} unique geographies`);
 
-    // 4. Create/Update hierarchy
+    // 4. UPSERT hierarchy - Preserves IDs!
     const stats = {
-      geographies: 0,
-      clients: 0,
-      projects: 0,
-      subprojects: 0,
+      geographies: { created: 0, existing: 0 },
+      clients: { created: 0, existing: 0 },
+      projects: { created: 0, existing: 0 },
+      subprojects: { created: 0, updated: 0 },
       requestTypes: 0,
       requestorTypes: 0
     };
 
+    const processedBusinessKeys = [];
+
     for (const [geoKey, geoData] of geographyMap) {
-      // Find or create Geography
+      // UPSERT Geography
       let geography = await Geography.findOne({ 
         name: { $regex: new RegExp(`^${geoData.name}$`, 'i') }
       });
@@ -246,11 +236,13 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
           description: "Created via MRO Bulk Upload",
           status: "active"
         });
-        stats.geographies++;
+        stats.geographies.created++;
         console.log(`✅ Created geography: ${geoData.name}`);
+      } else {
+        stats.geographies.existing++;
       }
 
-      // Find or create MRO Client
+      // UPSERT MRO Client
       let mroClient = await Client.findOne({
         geography_id: geography._id,
         name: { $regex: /^MRO$/i }
@@ -264,13 +256,15 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
           description: "MRO Client - Created via Bulk Upload",
           status: "active"
         });
-        stats.clients++;
+        stats.clients.created++;
         console.log(`✅ Created MRO client under ${geography.name}`);
+      } else {
+        stats.clients.existing++;
       }
 
       // Process each project (Processing/Logging/MRO Payer Project)
       for (const [projKey, projData] of geoData.projects) {
-        // Find or create Project
+        // UPSERT Project
         let project = await Project.findOne({
           client_id: mroClient._id,
           name: { $regex: new RegExp(`^${projData.name}$`, 'i') }
@@ -287,12 +281,18 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
             status: "active",
             visibility: "visible"
           });
-          stats.projects++;
+          stats.projects.created++;
           console.log(`✅ Created project: ${projData.name}`);
+        } else {
+          stats.projects.existing++;
         }
 
         // Process each subproject (location)
         for (const [subKey, subData] of projData.subprojects) {
+          // Generate business key
+          const businessKey = generateBusinessKey(mroClient.name, project.name, subData.name);
+          processedBusinessKeys.push(businessKey);
+          
           // Determine flatrate based on process type
           let flatrate = 0;
           if (projData.name === 'Logging') {
@@ -301,13 +301,44 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
             flatrate = subData.flatrate || 0;
           }
 
-          // Find or create Subproject
-          let subproject = await Subproject.findOne({
-            project_id: project._id,
-            name: { $regex: new RegExp(`^${subData.name}$`, 'i') }
-          });
+          // Build billing_rates array
+          const billingRates = [];
+          if (projData.name === 'Processing') {
+            billingRates.push({ requestor_type: 'NRS-NO Records', rate: subData.nrs_rate });
+            billingRates.push({ requestor_type: 'Manual', rate: subData.manual_rate });
+            billingRates.push({ requestor_type: 'Other Processing (Canceled/Released By Other)', rate: subData.other_processing_rate });
+            billingRates.push({ requestor_type: 'Processed', rate: subData.processed_rate });
+            billingRates.push({ requestor_type: 'Processed through File Drop', rate: subData.file_drop_rate });
+          }
 
+          // UPSERT Subproject using business key
+          let subproject = await Subproject.findOne({ business_key: businessKey });
+          
           if (!subproject) {
+            // Try finding by project_id + name
+            subproject = await Subproject.findOne({
+              project_id: project._id,
+              name: { $regex: new RegExp(`^${subData.name}$`, 'i') }
+            });
+          }
+
+          if (subproject) {
+            // UPDATE existing - preserve _id!
+            subproject.business_key = businessKey;
+            subproject.client_name = mroClient.name;
+            subproject.project_name = project.name;
+            subproject.geography_name = geography.name;
+            subproject.flatrate = flatrate;
+            subproject.status = 'active';
+            subproject.deactivated_at = null;
+            if (billingRates.length > 0) {
+              subproject.billing_rates = billingRates;
+            }
+            await subproject.save();
+            stats.subprojects.updated++;
+            console.log(`  📝 Updated: ${subData.name} (ID preserved: ${subproject._id})`);
+          } else {
+            // CREATE new
             subproject = await Subproject.create({
               name: subData.name,
               geography_id: geography._id,
@@ -316,20 +347,17 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
               client_name: mroClient.name,
               project_id: project._id,
               project_name: project.name,
-              description: `Created via MRO Bulk Upload`,
+              business_key: businessKey,
+              description: "Created via MRO Bulk Upload",
               status: "active",
-              flatrate: flatrate
+              flatrate: flatrate,
+              billing_rates: billingRates
             });
-            stats.subprojects++;
-          } else {
-            // Update flatrate if changed
-            if (subproject.flatrate !== flatrate) {
-              subproject.flatrate = flatrate;
-              await subproject.save();
-            }
+            stats.subprojects.created++;
+            console.log(`  ✅ Created: ${subData.name} (ID: ${subproject._id})`);
           }
 
-          // Create Request Types (all 6 for each subproject)
+          // UPSERT Request Types (all 6 for each subproject)
           for (const reqType of MRO_REQUEST_TYPES) {
             await SubprojectRequestType.findOneAndUpdate(
               { subproject_id: subproject._id, name: reqType },
@@ -339,7 +367,7 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
                   client_id: mroClient._id,
                   project_id: project._id,
                   name: reqType,
-                  rate: 0  // Request types don't have rates in MRO, requestor types do
+                  rate: 0
                 }
               },
               { upsert: true, new: true }
@@ -347,96 +375,32 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
             stats.requestTypes++;
           }
 
-          // Create Requestor Types with rates (for Processing)
+          // UPSERT Requestor Types with rates (for Processing)
           if (projData.name === 'Processing') {
-            console.log(`    Creating requestor types for ${subData.name}...`);
+            const requestorRates = [
+              { name: 'NRS-NO Records', rate: subData.nrs_rate },
+              { name: 'Manual', rate: subData.manual_rate },
+              { name: 'Other Processing (Canceled/Released By Other)', rate: subData.other_processing_rate },
+              { name: 'Processed', rate: subData.processed_rate },
+              { name: 'Processed through File Drop', rate: subData.file_drop_rate }
+            ];
             
-            // NRS-NO Records
-            const nrsType = await SubprojectRequestorType.findOneAndUpdate(
-              { subproject_id: subproject._id, name: 'NRS-NO Records' },
-              {
-                $set: { rate: subData.nrs_rate },
-                $setOnInsert: {
-                  geography_id: geography._id,
-                  client_id: mroClient._id,
-                  project_id: project._id,
-                  subproject_id: subproject._id,
-                  name: 'NRS-NO Records'
-                }
-              },
-              { upsert: true, new: true }
-            );
-            stats.requestorTypes++;
-
-            // Other Processing
-            const otherType = await SubprojectRequestorType.findOneAndUpdate(
-              { subproject_id: subproject._id, name: 'Other Processing (Canceled/Released By Other)' },
-              {
-                $set: { rate: subData.other_processing_rate },
-                $setOnInsert: {
-                  geography_id: geography._id,
-                  client_id: mroClient._id,
-                  project_id: project._id,
-                  subproject_id: subproject._id,
-                  name: 'Other Processing (Canceled/Released By Other)'
-                }
-              },
-              { upsert: true, new: true }
-            );
-            stats.requestorTypes++;
-
-            // Processed
-            const processedType = await SubprojectRequestorType.findOneAndUpdate(
-              { subproject_id: subproject._id, name: 'Processed' },
-              {
-                $set: { rate: subData.processed_rate },
-                $setOnInsert: {
-                  geography_id: geography._id,
-                  client_id: mroClient._id,
-                  project_id: project._id,
-                  subproject_id: subproject._id,
-                  name: 'Processed'
-                }
-              },
-              { upsert: true, new: true }
-            );
-            stats.requestorTypes++;
-
-            // Processed through File Drop
-            const fileDropType = await SubprojectRequestorType.findOneAndUpdate(
-              { subproject_id: subproject._id, name: 'Processed through File Drop' },
-              {
-                $set: { rate: subData.file_drop_rate },
-                $setOnInsert: {
-                  geography_id: geography._id,
-                  client_id: mroClient._id,
-                  project_id: project._id,
-                  subproject_id: subproject._id,
-                  name: 'Processed through File Drop'
-                }
-              },
-              { upsert: true, new: true }
-            );
-            stats.requestorTypes++;
-
-            // Manual (legacy/alternate pricing)
-            const manualType = await SubprojectRequestorType.findOneAndUpdate(
-              { subproject_id: subproject._id, name: 'Manual' },
-              {
-                $set: { rate: subData.manual_rate },
-                $setOnInsert: {
-                  geography_id: geography._id,
-                  client_id: mroClient._id,
-                  project_id: project._id,
-                  subproject_id: subproject._id,
-                  name: 'Manual'
-                }
-              },
-              { upsert: true, new: true }
-            );
-            stats.requestorTypes++;
-            
-            console.log(`      ✅ Created 5 requestor types for ${subData.name}`);
+            for (const rt of requestorRates) {
+              await SubprojectRequestorType.findOneAndUpdate(
+                { subproject_id: subproject._id, name: rt.name },
+                {
+                  $set: { rate: rt.rate },
+                  $setOnInsert: {
+                    geography_id: geography._id,
+                    client_id: mroClient._id,
+                    project_id: project._id,
+                    name: rt.name
+                  }
+                },
+                { upsert: true, new: true }
+              );
+              stats.requestorTypes++;
+            }
           }
         }
 
@@ -453,7 +417,7 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
       message: "MRO bulk upload completed successfully",
       summary: stats,
       rowsProcessed: validRows.length,
-      note: "Created Request Types (Batch, DDS, E-link, E-Request, Follow up, New Request) and Requestor Types with rates for Processing locations"
+      note: "Existing subprojects updated with preserved IDs, new ones created with business keys"
     });
 
   } catch (err) {
@@ -465,6 +429,8 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
 
 // =============================================
 // MRO BULK UPLOAD - REPLACE MODE
+// Soft-deletes subprojects not in upload, upserts rest
+// Still preserves IDs for subprojects in the upload!
 // =============================================
 router.post("/mro-bulk-upload-replace", upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded" });
@@ -473,7 +439,7 @@ router.post("/mro-bulk-upload-replace", upload.single("file"), async (req, res) 
   const rows = [];
 
   try {
-    console.log("⏱️ MRO Bulk Upload (Replace Mode) started...");
+    console.log("⏱️ MRO Bulk Upload (REPLACE mode) started...");
 
     // 1. Read CSV
     await new Promise((resolve, reject) => {
@@ -490,7 +456,7 @@ router.post("/mro-bulk-upload-replace", upload.single("file"), async (req, res) 
               if (h === "processed rate" || h === "processed_rate") return "processed_rate";
               if (h.includes("file drop") && h.includes("rate")) return "file_drop_rate";
               if (h.includes("manual") && h.includes("rate")) return "manual_rate";
-              if (h === "flatrate" || h === "flat rate" || h.includes("logging") && h.includes("rate")) return "flatrate";
+              if (h === "flatrate" || h === "flat rate" || (h.includes("logging") && h.includes("rate"))) return "flatrate";
               return header;
             },
           })
@@ -505,7 +471,7 @@ router.post("/mro-bulk-upload-replace", upload.single("file"), async (req, res) 
 
     console.log(`📄 Read ${rows.length} rows from CSV`);
 
-    // 2. Validate rows
+    // 2. Validate rows (same as upsert mode)
     const errors = [];
     const validRows = [];
     const csvDuplicateCheck = new Set();
@@ -544,7 +510,7 @@ router.post("/mro-bulk-upload-replace", upload.single("file"), async (req, res) 
         (t) => t.toLowerCase() === process_type.toLowerCase()
       );
       if (!matchedProcessType && process_type) {
-        rowErrors.push(`Invalid Process Type "${process_type}". Allowed: ${MRO_PROCESS_TYPES.join(", ")}`);
+        rowErrors.push(`Invalid Process Type. Allowed: ${MRO_PROCESS_TYPES.join(", ")}`);
       } else if (matchedProcessType) {
         rowOut.process_type = matchedProcessType;
       }
@@ -572,30 +538,9 @@ router.post("/mro-bulk-upload-replace", upload.single("file"), async (req, res) 
       return res.status(400).json({ error: "CSV contains no valid data rows" });
     }
 
-    console.log(`✅ Validated ${validRows.length} rows`);
-
-    // 3. Delete existing MRO data
-    console.log("🗑️ Deleting existing MRO data...");
-    
-    const mroClients = await Client.find({ name: { $regex: /^MRO$/i } }).lean();
-    const mroClientIds = mroClients.map(c => c._id);
-
-    if (mroClientIds.length > 0) {
-      const mroProjects = await Project.find({ client_id: { $in: mroClientIds } }).lean();
-      const mroProjectIds = mroProjects.map(p => p._id);
-
-      if (mroProjectIds.length > 0) {
-        await SubprojectRequestType.deleteMany({ project_id: { $in: mroProjectIds } });
-        await SubprojectRequestorType.deleteMany({ project_id: { $in: mroProjectIds } });
-        await Subproject.deleteMany({ project_id: { $in: mroProjectIds } });
-        await Project.deleteMany({ client_id: { $in: mroClientIds } });
-      }
-      
-      console.log(`✅ Deleted MRO projects, subprojects, and types`);
-    }
-
-    // 4. Group and create data (same as incremental)
+    // 3. Process (same grouping as upsert)
     const geographyMap = new Map();
+    const processedBusinessKeys = [];
 
     for (const r of validRows) {
       const geoKey = normalizeName(r.geography);
@@ -628,14 +573,15 @@ router.post("/mro-bulk-upload-replace", upload.single("file"), async (req, res) 
     }
 
     const stats = {
-      geographies: 0,
-      clients: 0,
-      projects: 0,
-      subprojects: 0,
+      geographies: { created: 0, existing: 0 },
+      clients: { created: 0, existing: 0 },
+      projects: { created: 0, existing: 0 },
+      subprojects: { created: 0, updated: 0, deactivated: 0 },
       requestTypes: 0,
       requestorTypes: 0
     };
 
+    // 4. UPSERT (same as incremental, but track business keys)
     for (const [geoKey, geoData] of geographyMap) {
       let geography = await Geography.findOne({ 
         name: { $regex: new RegExp(`^${geoData.name}$`, 'i') }
@@ -647,7 +593,9 @@ router.post("/mro-bulk-upload-replace", upload.single("file"), async (req, res) 
           description: "Created via MRO Bulk Upload",
           status: "active"
         });
-        stats.geographies++;
+        stats.geographies.created++;
+      } else {
+        stats.geographies.existing++;
       }
 
       let mroClient = await Client.findOne({
@@ -660,91 +608,163 @@ router.post("/mro-bulk-upload-replace", upload.single("file"), async (req, res) 
           name: "MRO",
           geography_id: geography._id,
           geography_name: geography.name,
-          description: "MRO Client",
           status: "active"
         });
-        stats.clients++;
+        stats.clients.created++;
+      } else {
+        stats.clients.existing++;
       }
 
       for (const [projKey, projData] of geoData.projects) {
-        const project = await Project.create({
-          name: projData.name,
-          geography_id: geography._id,
-          geography_name: geography.name,
+        let project = await Project.findOne({
           client_id: mroClient._id,
-          client_name: mroClient.name,
-          description: `MRO ${projData.name}`,
-          status: "active",
-          visibility: "visible"
+          name: { $regex: new RegExp(`^${projData.name}$`, 'i') }
         });
-        stats.projects++;
 
-        for (const [subKey, subData] of projData.subprojects) {
-          let flatrate = 0;
-          if (projData.name === 'Logging') {
-            flatrate = subData.flatrate || MRO_DEFAULT_PRICING.Logging.flatrate;
-          } else if (projData.name === 'MRO Payer Project') {
-            flatrate = subData.flatrate || 0;
-          }
-
-          const subproject = await Subproject.create({
-            name: subData.name,
+        if (!project) {
+          project = await Project.create({
+            name: projData.name,
             geography_id: geography._id,
             geography_name: geography.name,
             client_id: mroClient._id,
             client_name: mroClient.name,
-            project_id: project._id,
-            project_name: project.name,
-            description: "Created via MRO Bulk Upload",
             status: "active",
-            flatrate: flatrate
+            visibility: "visible"
           });
-          stats.subprojects++;
-
-          // Create Request Types
-          const requestTypeDocs = MRO_REQUEST_TYPES.map(reqType => ({
-            geography_id: geography._id,
-            client_id: mroClient._id,
-            project_id: project._id,
-            subproject_id: subproject._id,
-            name: reqType,
-            rate: 0
-          }));
-          await SubprojectRequestType.insertMany(requestTypeDocs, { ordered: false });
-          stats.requestTypes += requestTypeDocs.length;
-
-          // Create Requestor Types for Processing
-          if (projData.name === 'Processing') {
-            const requestorTypeDocs = [
-              { name: 'NRS-NO Records', rate: subData.nrs_rate },
-              { name: 'Other Processing (Canceled/Released By Other)', rate: subData.other_processing_rate },
-              { name: 'Processed', rate: subData.processed_rate },
-              { name: 'Processed through File Drop', rate: subData.file_drop_rate },
-              { name: 'Manual', rate: subData.manual_rate }
-            ].map(rt => ({
-              geography_id: geography._id,
-              client_id: mroClient._id,
-              project_id: project._id,
-              subproject_id: subproject._id,
-              name: rt.name,
-              rate: rt.rate
-            }));
-            await SubprojectRequestorType.insertMany(requestorTypeDocs, { ordered: false });
-            stats.requestorTypes += requestorTypeDocs.length;
-          }
+          stats.projects.created++;
+        } else {
+          stats.projects.existing++;
         }
 
-        console.log(`  📦 Created ${projData.subprojects.size} locations under ${projData.name}`);
+        for (const [subKey, subData] of projData.subprojects) {
+          const businessKey = generateBusinessKey(mroClient.name, project.name, subData.name);
+          processedBusinessKeys.push(businessKey);
+          
+          let flatrate = 0;
+          if (projData.name === 'Logging') {
+            flatrate = subData.flatrate || MRO_DEFAULT_PRICING.Logging.flatrate;
+          }
+
+          const billingRates = [];
+          if (projData.name === 'Processing') {
+            billingRates.push({ requestor_type: 'NRS-NO Records', rate: subData.nrs_rate });
+            billingRates.push({ requestor_type: 'Manual', rate: subData.manual_rate });
+            billingRates.push({ requestor_type: 'Other Processing (Canceled/Released By Other)', rate: subData.other_processing_rate });
+            billingRates.push({ requestor_type: 'Processed', rate: subData.processed_rate });
+            billingRates.push({ requestor_type: 'Processed through File Drop', rate: subData.file_drop_rate });
+          }
+
+          let subproject = await Subproject.findOne({ business_key: businessKey });
+          
+          if (!subproject) {
+            subproject = await Subproject.findOne({
+              project_id: project._id,
+              name: { $regex: new RegExp(`^${subData.name}$`, 'i') }
+            });
+          }
+
+          if (subproject) {
+            subproject.business_key = businessKey;
+            subproject.client_name = mroClient.name;
+            subproject.project_name = project.name;
+            subproject.geography_name = geography.name;
+            subproject.flatrate = flatrate;
+            subproject.status = 'active';
+            subproject.deactivated_at = null;
+            if (billingRates.length > 0) {
+              subproject.billing_rates = billingRates;
+            }
+            await subproject.save();
+            stats.subprojects.updated++;
+          } else {
+            subproject = await Subproject.create({
+              name: subData.name,
+              geography_id: geography._id,
+              geography_name: geography.name,
+              client_id: mroClient._id,
+              client_name: mroClient.name,
+              project_id: project._id,
+              project_name: project.name,
+              business_key: businessKey,
+              status: "active",
+              flatrate: flatrate,
+              billing_rates: billingRates
+            });
+            stats.subprojects.created++;
+          }
+
+          // Request Types
+          for (const reqType of MRO_REQUEST_TYPES) {
+            await SubprojectRequestType.findOneAndUpdate(
+              { subproject_id: subproject._id, name: reqType },
+              {
+                $setOnInsert: {
+                  geography_id: geography._id,
+                  client_id: mroClient._id,
+                  project_id: project._id,
+                  name: reqType,
+                  rate: 0
+                }
+              },
+              { upsert: true }
+            );
+            stats.requestTypes++;
+          }
+
+          // Requestor Types for Processing
+          if (projData.name === 'Processing') {
+            const requestorRates = [
+              { name: 'NRS-NO Records', rate: subData.nrs_rate },
+              { name: 'Manual', rate: subData.manual_rate },
+              { name: 'Other Processing (Canceled/Released By Other)', rate: subData.other_processing_rate },
+              { name: 'Processed', rate: subData.processed_rate },
+              { name: 'Processed through File Drop', rate: subData.file_drop_rate }
+            ];
+            
+            for (const rt of requestorRates) {
+              await SubprojectRequestorType.findOneAndUpdate(
+                { subproject_id: subproject._id, name: rt.name },
+                {
+                  $set: { rate: rt.rate },
+                  $setOnInsert: {
+                    geography_id: geography._id,
+                    client_id: mroClient._id,
+                    project_id: project._id,
+                    name: rt.name
+                  }
+                },
+                { upsert: true }
+              );
+              stats.requestorTypes++;
+            }
+          }
+        }
       }
     }
 
-    fs.unlinkSync(filePath);
+    // 5. SOFT DELETE subprojects not in upload (MRO only)
+    const deactivateResult = await Subproject.updateMany(
+      {
+        business_key: { $nin: processedBusinessKeys },
+        client_name: { $regex: /^MRO$/i },
+        status: 'active'
+      },
+      {
+        $set: {
+          status: 'inactive',
+          deactivated_at: new Date()
+        }
+      }
+    );
+    stats.subprojects.deactivated = deactivateResult.modifiedCount || 0;
 
-    console.log(`\n🎉 MRO Bulk Upload (Replace) completed!`);
+    console.log(`[REPLACE] Soft-deleted ${stats.subprojects.deactivated} MRO subprojects not in upload`);
+
+    fs.unlinkSync(filePath);
 
     return res.json({
       status: "success",
-      message: "MRO bulk upload completed (replaced existing data)",
+      message: "MRO bulk upload (replace mode) completed",
       summary: stats,
       rowsProcessed: validRows.length
     });

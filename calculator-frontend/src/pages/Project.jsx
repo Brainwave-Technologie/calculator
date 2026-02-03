@@ -422,53 +422,55 @@ const handleDeleteGeography = (geography, e) => {
   };
 
   // ==================== CSV UPLOADS ====================
-  const handleVerismaCSVUpload = async (event) => {
-    const file = event.target.files[0];
-    if (!file) return;
-    if (file.type !== "text/csv") {
-      toast.error("Invalid CSV file");
+ const handleVerismaCSVUpload = async (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+  if (file.type !== "text/csv" && !file.name.endsWith('.csv')) {
+    toast.error("Invalid CSV file");
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("file", file);
+  toast.loading("Uploading Verisma data...");
+
+  try {
+    // FIXED: Use Verisma-specific endpoint instead of generic bulk-upload
+    const res = await axios.post(`${apiUrl}/upload/verisma-bulk-upload-replace`, formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+      responseType: "blob",
+    });
+
+    const isJSON = res.headers["content-type"]?.includes("application/json");
+
+    if (isJSON) {
+      const text = await res.data.text();
+      const json = JSON.parse(text);
+      toast.dismiss();
+      toast.success(json.message || "Verisma data uploaded successfully!");
+      console.log("Upload summary:", json.summary);
+      refreshAll();
       return;
     }
-
-    const formData = new FormData();
-    formData.append("file", file);
-    toast.loading("Uploading Verisma data...");
-
-    try {
-      const res = await axios.post(`${apiUrl}/upload/bulk-upload`, formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-        responseType: "blob",
-      });
-
-      const isJSON = res.headers["content-type"]?.includes("application/json");
-
-      if (isJSON) {
-        const text = await res.data.text();
-        const json = JSON.parse(text);
-        toast.dismiss();
-        toast.success(json.message || "Uploaded successfully!");
-        refreshAll();
-        return;
-      }
-    } catch (err) {
-      if (err?.response?.status === 400 && err.response.headers["content-type"]?.includes("text/csv")) {
-        const blob = err.response.data;
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "verisma-upload-errors.csv";
-        a.click();
-        toast.dismiss();
-        toast.error("Errors found. Check downloaded CSV.");
-        return;
-      }
+  } catch (err) {
+    if (err?.response?.status === 400 && err.response.headers["content-type"]?.includes("text/csv")) {
+      const blob = err.response.data;
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "verisma-upload-errors.csv";
+      a.click();
       toast.dismiss();
-      toast.error("Upload failed.");
-    } finally {
-      event.target.value = "";
+      toast.error("Errors found. Check downloaded CSV.");
+      return;
     }
-  };
-
+    toast.dismiss();
+    const errorMsg = err?.response?.data?.error || "Upload failed.";
+    toast.error(errorMsg);
+  } finally {
+    event.target.value = "";
+  }
+};
   const handleMROCSVUpload = async (event) => {
     const file = event.target.files[0];
     if (!file) return;

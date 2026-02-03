@@ -22,6 +22,12 @@ import ResourceDashboard from "./pages/resources/ResourceDashboard";
 // Protected route components
 import { AdminRoute, HomeRedirect } from "./components/ProtectedRoute";
 import ResourceRoute from "./components/ResourceRoute"; // Use the new one with session timeout
+import PreviousLoggedCases from "./pages/resources/PreviousLoggedCases";
+// import ResourceManagement from "./pages/admin/ResourceManagement";
+import ResourceLoginActivity from "./pages/admin/ResourceLoginActivity";
+import AdminPreviousCases from "./pages/admin/AdminPreviousCases";
+import AdminDeleteRequests from "./pages/admin/AdminDeleteRequests";
+import AdminResourceCases from "./pages/admin/AdminResourceCases";
 
 const AppRoutes = () => {
   return (
@@ -49,6 +55,11 @@ const AppRoutes = () => {
         <Route path="/masterdatabase" element={<MasterDatabase />} />
         <Route path="/invoices" element={<Invoices />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/resource-Login-Activity" element={<ResourceLoginActivity />} />
+        <Route path="/admin-delete-requests" element={<AdminDeleteRequests />} />
+        <Route path="/admin-previous-cases" element={<AdminPreviousCases />} />
+        <Route path="/admin-resource-cases" element={<AdminResourceCases />} />
+
       </Route>
 
       {/* Resource routes - ResourceRoute handles everything internally */}
@@ -60,6 +71,14 @@ const AppRoutes = () => {
           </ResourceRoute>
         }
       />
+      <Route 
+          path="/previous-logged-cases" 
+          element={
+            <ResourceRoute>
+              <PreviousLoggedCases />
+            </ResourceRoute>
+          } 
+        />
 
       {/* 404 - Redirect to home */}
       <Route path="*" element={<Navigate to="/" replace />} />

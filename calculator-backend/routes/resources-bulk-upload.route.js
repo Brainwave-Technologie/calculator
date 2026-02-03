@@ -1,4 +1,4 @@
-// routes/upload-resource.routes.js - Resource CSV Upload with correct assignments structure
+// routes/upload-resource.routes.js - Resource CSV Upload with UPSERT logic (preserves IDs)
 const express = require("express");
 const router = express.Router();
 const multer = require("multer");
@@ -11,16 +11,26 @@ const Geography = require("../models/Geography");
 const Client = require("../models/Client");
 const Project = require("../models/Project");
 const Subproject = require("../models/Subproject");
+const ActivityLog = require("../models/ActivityLog");
 
 const upload = multer({ dest: "uploads/" });
 
 const norm = (s) => (typeof s === "string" ? s.trim() : "");
 
 // =============================================
-// RESOURCE BULK UPLOAD
-// CSV Format: Name, Location, Process Type, Client, Geography, Email ID
-// Saves to assignments array with proper structure:
-// assignments: [{ geography_id, geography_name, client_id, client_name, project_id, project_name, subprojects: [{ subproject_id, subproject_name }] }]
+// HELPER: Generate subproject business key
+// =============================================
+function generateSubprojectKey(clientName, projectName, subprojectName) {
+  return [
+    (clientName || '').toLowerCase().trim(),
+    (projectName || '').toLowerCase().trim(),
+    (subprojectName || '').toLowerCase().trim()
+  ].join('|');
+}
+
+// =============================================
+// RESOURCE BULK UPLOAD - UPSERT MODE
+// Preserves existing resource IDs, updates assignments
 // =============================================
 router.post("/bulk", upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded" });
@@ -29,7 +39,7 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
   const rows = [];
 
   try {
-    console.log("⏱️ Resource Bulk Upload started...");
+    console.log("⏱️ Resource Bulk Upload (UPSERT mode) started...");
 
     // 1. Read CSV
     await new Promise((resolve, reject) => {
@@ -38,9 +48,9 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
           csv({
             mapHeaders: ({ header }) => {
               const h = header.toLowerCase().trim();
-              if (h === "name" || h === "resource name" || h === "resource") return "name";
+              if (h === "name" || h === "resource name" || h === "resource" || h === "assigner name") return "name";
               if (h === "location" || h === "subproject" || h === "sub-project" || h === "sub project") return "location";
-              if (h === "process type" || h === "process_type" || h === "processtype" || h === "project") return "process_type";
+              if (h === "process type" || h === "process_type" || h === "processtype" || h === "project" || h === "process") return "process_type";
               if (h === "client" || h === "client name" || h === "client_name") return "client";
               if (h === "geography" || h === "geo" || h === "region") return "geography";
               if (h === "email" || h === "email id" || h === "email_id" || h === "emailid") return "email";
@@ -71,7 +81,7 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
       const location = norm(r.location);
       const processType = norm(r.process_type);
       const clientName = norm(r.client);
-      const geographyName = norm(r.geography);
+      const geographyName = norm(r.geography) || "US";
       const email = norm(r.email);
       const role = norm(r.role) || "associate";
 
@@ -82,7 +92,6 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
       if (!location) rowErrors.push("Location is required");
       if (!processType) rowErrors.push("Process Type is required");
       if (!clientName) rowErrors.push("Client is required");
-      if (!geographyName) rowErrors.push("Geography is required");
 
       if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         rowErrors.push("Invalid email format");
@@ -107,7 +116,7 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
           processType,
           clientName,
           geographyName,
-          email,
+          email: email.toLowerCase().trim(),
           role,
         });
       }
@@ -116,8 +125,7 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
     console.log(`✅ Validated: ${validRows.length} valid, ${errors.length} errors`);
 
     // 3. Process valid rows - Group by resource email
-    // Build assignments in the correct format
-    const resourceMap = new Map(); // email -> { name, email, role, assignmentsMap }
+    const resourceMap = new Map();
 
     for (const row of validRows) {
       // Find Geography
@@ -190,11 +198,35 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
         continue;
       }
 
-      // Find Subproject (Location)
-      const subproject = await Subproject.findOne({
-        project_id: project._id,
-        name: { $regex: new RegExp(`^${row.location}$`, "i") },
+      // Find or Create Subproject using business key (UPSERT)
+      const subprojectKey = generateSubprojectKey(client.name, project.name, row.location);
+      
+      let subproject = await Subproject.findOne({
+        business_key: subprojectKey
       }).lean();
+      
+      // If not found by business key, try by project_id and name
+      if (!subproject) {
+        subproject = await Subproject.findOne({
+          project_id: project._id,
+          name: { $regex: new RegExp(`^${row.location}$`, "i") },
+        }).lean();
+        
+        // Update with business key if found
+        if (subproject && !subproject.business_key) {
+          await Subproject.updateOne(
+            { _id: subproject._id },
+            { 
+              $set: { 
+                business_key: subprojectKey,
+                client_name: client.name,
+                project_name: project.name
+              } 
+            }
+          );
+          subproject.business_key = subprojectKey;
+        }
+      }
 
       if (!subproject) {
         errors.push({
@@ -211,13 +243,12 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
       }
 
       // Add to resource map with proper assignment structure
-      const emailKey = row.email.toLowerCase();
+      const emailKey = row.email;
       if (!resourceMap.has(emailKey)) {
         resourceMap.set(emailKey, {
           name: row.name,
           email: row.email,
           role: row.role,
-          // Map: "geoId|clientId|projectId" -> assignment object
           assignmentsMap: new Map(),
         });
       }
@@ -235,7 +266,7 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
           client_name: client.name,
           project_id: project._id,
           project_name: project.name,
-          subprojectsMap: new Map(), // subproject_id string -> { subproject_id, subproject_name }
+          subprojectsMap: new Map(),
         });
       }
 
@@ -246,15 +277,18 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
         assignment.subprojectsMap.set(spIdStr, {
           subproject_id: subproject._id,
           subproject_name: subproject.name,
+          subproject_key: subprojectKey // Store business key!
         });
       }
     }
 
-    // 4. Create/Update Resources with proper assignments structure
+    // 4. UPSERT Resources - Preserve existing IDs!
     const stats = {
       created: 0,
       updated: 0,
       assignments: 0,
+      assignmentsAdded: 0,
+      assignmentsRemoved: 0
     };
 
     for (const [email, data] of resourceMap) {
@@ -274,13 +308,40 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
         stats.assignments += subprojects.length;
       }
 
-      // Check if resource exists
-      let resource = await Resource.findOne({ email: { $regex: new RegExp(`^${email}$`, "i") } });
+      // Check if resource exists using normalized email
+      let resource = await Resource.findOne({ 
+        $or: [
+          { email_normalized: email },
+          { email: { $regex: new RegExp(`^${email}$`, "i") } }
+        ]
+      });
 
       if (resource) {
-        // Merge assignments with existing ones
+        // Track assignment changes for activity log
+        const oldAssignmentKeys = new Set();
+        const newAssignmentKeys = new Set();
+        
+        for (const assignment of resource.assignments || []) {
+          for (const sp of assignment.subprojects || []) {
+            if (sp.subproject_key) {
+              oldAssignmentKeys.add(sp.subproject_key);
+            }
+          }
+        }
+        
+        for (const assignment of newAssignments) {
+          for (const sp of assignment.subprojects || []) {
+            if (sp.subproject_key) {
+              newAssignmentKeys.add(sp.subproject_key);
+            }
+          }
+        }
+        
+        const addedKeys = [...newAssignmentKeys].filter(k => !oldAssignmentKeys.has(k));
+        const removedKeys = [...oldAssignmentKeys].filter(k => !newAssignmentKeys.has(k));
+        
+        // Merge new assignments with existing ones
         for (const newAssignment of newAssignments) {
-          // Find existing assignment with same geo/client/project
           const existingAssignmentIndex = resource.assignments.findIndex(
             (a) =>
               a.geography_id?.toString() === newAssignment.geography_id.toString() &&
@@ -310,13 +371,42 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
 
         resource.name = data.name;
         resource.role = data.role;
+        resource.email_normalized = email; // Ensure normalized email is set
+        resource.status = 'active'; // Reactivate if was inactive
+        resource.deactivated_at = null;
+        resource.deactivated_reason = null;
+        
         await resource.save();
         stats.updated++;
+        stats.assignmentsAdded += addedKeys.length;
+        
+        // Log activity for added assignments
+        if (ActivityLog && addedKeys.length > 0) {
+          try {
+            for (const key of addedKeys) {
+              await ActivityLog.create({
+                activity_type: 'ASSIGNMENT_ADDED',
+                actor_type: 'system',
+                actor_email: 'csv_upload',
+                resource_id: resource._id,
+                resource_email: resource.email,
+                resource_name: resource.name,
+                subproject_key: key,
+                details: { added_via: 'csv_bulk_upload' }
+              });
+            }
+          } catch (logErr) {
+            console.log('Activity log error (non-fatal):', logErr.message);
+          }
+        }
+        
+        console.log(`[UPSERT] Updated: ${email} (ID: ${resource._id}, +${addedKeys.length} assignments)`);
       } else {
         // Create new resource
         resource = new Resource({
           name: data.name,
-          email: data.email,
+          email: email,
+          email_normalized: email,
           role: data.role,
           status: "active",
           assignments: newAssignments,
@@ -327,13 +417,15 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
 
         await resource.save();
         stats.created++;
+        
+        console.log(`[UPSERT] Created: ${email} (ID: ${resource._id})`);
       }
     }
 
     // Clean up
     fs.unlinkSync(filePath);
 
-    // If there were errors, return error CSV
+    // Return results
     if (errors.length > 0) {
       const fields = ["row", "name", "location", "process_type", "client", "geography", "email", "errors"];
       const parser = new Parser({ fields });
@@ -365,7 +457,8 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
 
 // =============================================
 // RESOURCE BULK UPLOAD - REPLACE MODE
-// Clears existing assignments before adding new ones
+// Replaces all assignments but PRESERVES resource IDs
+// Soft-deletes resources not in upload
 // =============================================
 router.post("/bulk-replace", upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded" });
@@ -374,7 +467,7 @@ router.post("/bulk-replace", upload.single("file"), async (req, res) => {
   const rows = [];
 
   try {
-    console.log("⏱️ Resource Bulk Upload (Replace Mode) started...");
+    console.log("⏱️ Resource Bulk Upload (REPLACE mode) started...");
 
     // 1. Read CSV
     await new Promise((resolve, reject) => {
@@ -383,9 +476,9 @@ router.post("/bulk-replace", upload.single("file"), async (req, res) => {
           csv({
             mapHeaders: ({ header }) => {
               const h = header.toLowerCase().trim();
-              if (h === "name" || h === "resource name" || h === "resource") return "name";
+              if (h === "name" || h === "resource name" || h === "resource" || h === "assigner name") return "name";
               if (h === "location" || h === "subproject" || h === "sub-project" || h === "sub project") return "location";
-              if (h === "process type" || h === "process_type" || h === "processtype" || h === "project") return "process_type";
+              if (h === "process type" || h === "process_type" || h === "processtype" || h === "project" || h === "process") return "process_type";
               if (h === "client" || h === "client name" || h === "client_name") return "client";
               if (h === "geography" || h === "geo" || h === "region") return "geography";
               if (h === "email" || h === "email id" || h === "email_id" || h === "emailid") return "email";
@@ -416,7 +509,7 @@ router.post("/bulk-replace", upload.single("file"), async (req, res) => {
       const location = norm(r.location);
       const processType = norm(r.process_type);
       const clientName = norm(r.client);
-      const geographyName = norm(r.geography);
+      const geographyName = norm(r.geography) || "US";
       const email = norm(r.email);
       const role = norm(r.role) || "associate";
 
@@ -427,7 +520,6 @@ router.post("/bulk-replace", upload.single("file"), async (req, res) => {
       if (!location) rowErrors.push("Location is required");
       if (!processType) rowErrors.push("Process Type is required");
       if (!clientName) rowErrors.push("Client is required");
-      if (!geographyName) rowErrors.push("Geography is required");
 
       if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         rowErrors.push("Invalid email format");
@@ -452,7 +544,7 @@ router.post("/bulk-replace", upload.single("file"), async (req, res) => {
           processType,
           clientName,
           geographyName,
-          email,
+          email: email.toLowerCase().trim(),
           role,
         });
       }
@@ -460,6 +552,7 @@ router.post("/bulk-replace", upload.single("file"), async (req, res) => {
 
     // 3. Process valid rows
     const resourceMap = new Map();
+    const processedEmails = new Set();
 
     for (const row of validRows) {
       const geography = await Geography.findOne({
@@ -528,10 +621,32 @@ router.post("/bulk-replace", upload.single("file"), async (req, res) => {
         continue;
       }
 
-      const subproject = await Subproject.findOne({
-        project_id: project._id,
-        name: { $regex: new RegExp(`^${row.location}$`, "i") },
+      const subprojectKey = generateSubprojectKey(client.name, project.name, row.location);
+      
+      let subproject = await Subproject.findOne({
+        business_key: subprojectKey
       }).lean();
+      
+      if (!subproject) {
+        subproject = await Subproject.findOne({
+          project_id: project._id,
+          name: { $regex: new RegExp(`^${row.location}$`, "i") },
+        }).lean();
+        
+        if (subproject && !subproject.business_key) {
+          await Subproject.updateOne(
+            { _id: subproject._id },
+            { 
+              $set: { 
+                business_key: subprojectKey,
+                client_name: client.name,
+                project_name: project.name
+              } 
+            }
+          );
+          subproject.business_key = subprojectKey;
+        }
+      }
 
       if (!subproject) {
         errors.push({
@@ -547,7 +662,9 @@ router.post("/bulk-replace", upload.single("file"), async (req, res) => {
         continue;
       }
 
-      const emailKey = row.email.toLowerCase();
+      const emailKey = row.email;
+      processedEmails.add(emailKey);
+      
       if (!resourceMap.has(emailKey)) {
         resourceMap.set(emailKey, {
           name: row.name,
@@ -578,14 +695,16 @@ router.post("/bulk-replace", upload.single("file"), async (req, res) => {
         assignment.subprojectsMap.set(spIdStr, {
           subproject_id: subproject._id,
           subproject_name: subproject.name,
+          subproject_key: subprojectKey
         });
       }
     }
 
-    // 4. Create/Update Resources (Replace mode - overwrite assignments)
+    // 4. UPSERT Resources (Replace mode - completely replace assignments)
     const stats = {
       created: 0,
       updated: 0,
+      deactivated: 0,
       assignments: 0,
     };
 
@@ -605,19 +724,32 @@ router.post("/bulk-replace", upload.single("file"), async (req, res) => {
         stats.assignments += subprojects.length;
       }
 
-      let resource = await Resource.findOne({ email: { $regex: new RegExp(`^${email}$`, "i") } });
+      let resource = await Resource.findOne({ 
+        $or: [
+          { email_normalized: email },
+          { email: { $regex: new RegExp(`^${email}$`, "i") } }
+        ]
+      });
 
       if (resource) {
-        // Replace mode: completely replace assignments
+        // Replace mode: completely replace assignments (but KEEP the ID!)
         resource.name = data.name;
         resource.role = data.role;
+        resource.email_normalized = email;
         resource.assignments = newAssignments;
+        resource.status = 'active';
+        resource.deactivated_at = null;
+        resource.deactivated_reason = null;
+        
         await resource.save();
         stats.updated++;
+        
+        console.log(`[REPLACE] Updated: ${email} (ID preserved: ${resource._id})`);
       } else {
         resource = new Resource({
           name: data.name,
-          email: data.email,
+          email: email,
+          email_normalized: email,
           role: data.role,
           status: "active",
           assignments: newAssignments,
@@ -628,8 +760,28 @@ router.post("/bulk-replace", upload.single("file"), async (req, res) => {
 
         await resource.save();
         stats.created++;
+        
+        console.log(`[REPLACE] Created: ${email} (ID: ${resource._id})`);
       }
     }
+
+    // 5. SOFT DELETE resources not in the upload
+    const deactivateResult = await Resource.updateMany(
+      { 
+        email_normalized: { $nin: Array.from(processedEmails) },
+        status: 'active'
+      },
+      { 
+        $set: { 
+          status: 'inactive',
+          deactivated_at: new Date(),
+          deactivated_reason: 'Not included in bulk-replace upload'
+        } 
+      }
+    );
+    stats.deactivated = deactivateResult.modifiedCount || 0;
+    
+    console.log(`[REPLACE] Soft-deleted ${stats.deactivated} resources not in upload`);
 
     fs.unlinkSync(filePath);
 
@@ -659,6 +811,66 @@ router.post("/bulk-replace", upload.single("file"), async (req, res) => {
     } catch {}
     return res.status(500).json({ error: "Failed to process CSV: " + err.message });
   }
+});
+
+// =============================================
+// REFRESH LINKS - Re-link DailyAllocations after upload
+// =============================================
+router.post("/refresh-links", async (req, res) => {
+  try {
+    const { month, year, client } = req.body;
+    
+    if (!month || !year) {
+      return res.status(400).json({ message: 'Month and year are required' });
+    }
+    
+    const results = {};
+    
+    // Refresh MRO allocations
+    try {
+      const MRODailyAllocation = require('../models/MRODailyAllocation');
+      results.mro = await MRODailyAllocation.refreshObjectIdReferences(
+        parseInt(month), 
+        parseInt(year)
+      );
+    } catch (e) {
+      results.mro = { error: e.message };
+    }
+    
+    // Refresh Verisma allocations
+    try {
+      const VerismaDailyAllocation = require('../models/VerismaDailyAllocation');
+      results.verisma = await VerismaDailyAllocation.refreshObjectIdReferences(
+        parseInt(month), 
+        parseInt(year)
+      );
+    } catch (e) {
+      results.verisma = { error: e.message };
+    }
+    
+    res.json({
+      success: true,
+      message: 'ObjectId references refreshed',
+      results
+    });
+    
+  } catch (error) {
+    console.error('Refresh links error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// =============================================
+// GET TEMPLATE
+// =============================================
+router.get("/template", (req, res) => {
+  const template = `Name,Location,Process Type,Client,Geography,Email ID
+Rashmi Kottachery,Christus Health,Complete logging,MRO,US,rashmi@valerionhealth.us
+Rashmi Kottachery,Banner Health,Processing,MRO,US,rashmi@valerionhealth.us`;
+  
+  res.setHeader("Content-Type", "text/csv");
+  res.setHeader("Content-Disposition", "attachment; filename=Resource_Upload_Template.csv");
+  res.send(template);
 });
 
 module.exports = router;
