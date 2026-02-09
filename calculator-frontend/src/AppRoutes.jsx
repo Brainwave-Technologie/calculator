@@ -55,9 +55,7 @@ const AppRoutes = () => {
         <Route path="/masterdatabase" element={<MasterDatabase />} />
         <Route path="/invoices" element={<Invoices />} />
         <Route path="/settings" element={<SettingsPage />} />
-        <Route path="/resource-Login-Activity" element={<ResourceLoginActivity />} />
         <Route path="/admin-delete-requests" element={<AdminDeleteRequests />} />
-        <Route path="/admin-previous-cases" element={<AdminPreviousCases />} />
         <Route path="/admin-resource-cases" element={<AdminResourceCases />} />
 
       </Route>

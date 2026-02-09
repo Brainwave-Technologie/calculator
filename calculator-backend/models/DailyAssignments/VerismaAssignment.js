@@ -1,4 +1,6 @@
-// models/VerismaAssignment.js - Track daily case assignments to resources for Verisma
+// models/DailyAssignments/VerismaAssignment.js
+// Track daily case assignments to resources for Verisma
+// FIXED: Proper pending/logged status management
 const mongoose = require('mongoose');
 
 const VerismaAssignmentSchema = new mongoose.Schema({
@@ -26,9 +28,10 @@ const VerismaAssignmentSchema = new mongoose.Schema({
   subproject_key: { type: String, index: true },
   
   // ============ ASSIGNMENT STATUS ============
+  // CRITICAL: This determines if it shows in pending list
   status: {
     type: String,
-    enum: ['pending', 'logged', 'partial', 'skipped'],
+    enum: ['pending', 'logged', 'skipped'],
     default: 'pending',
     index: true
   },
@@ -40,17 +43,17 @@ const VerismaAssignmentSchema = new mongoose.Schema({
   is_late_log: { type: Boolean, default: false },
   days_late: { type: Number, default: 0 },
   
-  // ============ VISIBILITY CONTROL ============
-  is_visible: { type: Boolean, default: true, index: true },
-  hidden_at: { type: Date },
-  hidden_reason: { type: String, enum: ['logged', 'month_end', 'manual'] },
-  
   // ============ SOURCE ============
   source: {
     type: String,
     enum: ['csv_upload', 'manual', 'auto_assign'],
     default: 'csv_upload'
   },
+  
+  // ============ UPLOAD TRACKING ============
+  upload_batch_id: { type: String },
+  uploaded_by: { type: String },
+  uploaded_at: { type: Date },
   
   notes: { type: String }
   
@@ -59,8 +62,12 @@ const VerismaAssignmentSchema = new mongoose.Schema({
 });
 
 // ============ INDEXES ============
-VerismaAssignmentSchema.index({ resource_email: 1, assignment_date: 1, subproject_key: 1 }, { unique: true });
-VerismaAssignmentSchema.index({ resource_email: 1, status: 1, is_visible: 1 });
+// Unique: One assignment per resource per location per date
+VerismaAssignmentSchema.index(
+  { resource_email: 1, assignment_date: 1, subproject_id: 1 }, 
+  { unique: true }
+);
+VerismaAssignmentSchema.index({ resource_email: 1, status: 1 });
 VerismaAssignmentSchema.index({ month: 1, year: 1, status: 1 });
 
 // ============ PRE-SAVE HOOK ============
@@ -85,40 +92,73 @@ VerismaAssignmentSchema.pre('save', function(next) {
 
 // ============ STATIC METHODS ============
 
-// Get pending assignments for a resource (not yet logged)
+/**
+ * GET PENDING ASSIGNMENTS FOR RESOURCE
+ * 
+ * LOGIC:
+ * 1. First check for ANY pending assignments from PREVIOUS days (before today)
+ * 2. If previous pending exist → return ONLY those (block today's assignments)
+ * 3. If no previous pending → return today's pending assignments
+ * 
+ * This ensures resources complete old work before getting new assignments
+ */
 VerismaAssignmentSchema.statics.getPendingAssignments = async function(resourceEmail) {
-  const now = new Date();
-  const currentMonth = now.getMonth() + 1;
-  const currentYear = now.getFullYear();
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
   
-  const monthStart = new Date(currentYear, currentMonth - 1, 1);
-  monthStart.setHours(0, 0, 0, 0);
+  const todayEnd = new Date(today);
+  todayEnd.setHours(23, 59, 59, 999);
   
-  return this.find({
+  // Step 1: Check for pending assignments from BEFORE today
+  const previousPending = await this.find({
+    resource_email: resourceEmail.toLowerCase(),
+    status: 'pending', // Only pending, not logged
+    assignment_date: { $lt: today } // Before today
+  }).sort({ assignment_date: 1, subproject_name: 1 });
+  
+  // Step 2: If previous pending exist, return ONLY those
+  if (previousPending.length > 0) {
+    return {
+      assignments: previousPending,
+      has_previous_pending: true,
+      previous_pending_count: previousPending.length,
+      blocked_message: `You have ${previousPending.length} pending assignment(s) from previous days. Please complete them first before today's assignments become available.`
+    };
+  }
+  
+  // Step 3: No previous pending, get today's pending assignments
+  const todaysPending = await this.find({
     resource_email: resourceEmail.toLowerCase(),
     status: 'pending',
-    is_visible: true,
-    assignment_date: { $gte: monthStart }
-  }).sort({ assignment_date: 1, subproject_name: 1 });
-};
-
-// Get assignments for a specific date
-VerismaAssignmentSchema.statics.getAssignmentsForDate = async function(resourceEmail, date) {
-  const startOfDay = new Date(date);
-  startOfDay.setHours(0, 0, 0, 0);
-  const endOfDay = new Date(date);
-  endOfDay.setHours(23, 59, 59, 999);
-  
-  return this.find({
-    resource_email: resourceEmail.toLowerCase(),
-    assignment_date: { $gte: startOfDay, $lte: endOfDay }
+    assignment_date: { $gte: today, $lte: todayEnd }
   }).sort({ subproject_name: 1 });
+  
+  return {
+    assignments: todaysPending,
+    has_previous_pending: false,
+    previous_pending_count: 0,
+    blocked_message: null
+  };
 };
 
-// Mark assignment as logged
+/**
+ * MARK ASSIGNMENT AS LOGGED
+ * Called when resource submits an entry for this assignment
+ * 
+ * CRITICAL: This removes it from the pending list
+ */
 VerismaAssignmentSchema.statics.markAsLogged = async function(assignmentId, allocationId) {
   const assignment = await this.findById(assignmentId);
-  if (!assignment) return null;
+  if (!assignment) {
+    console.log(`[VerismaAssignment] Assignment not found: ${assignmentId}`);
+    return null;
+  }
+  
+  // Already logged? Skip
+  if (assignment.status === 'logged') {
+    console.log(`[VerismaAssignment] Already logged: ${assignmentId}`);
+    return assignment;
+  }
   
   const now = new Date();
   const assignDate = new Date(assignment.assignment_date);
@@ -129,101 +169,41 @@ VerismaAssignmentSchema.statics.markAsLogged = async function(assignmentId, allo
   const isLate = logDate > assignDate;
   const daysLate = isLate ? Math.floor((logDate - assignDate) / (1000 * 60 * 60 * 24)) : 0;
   
+  // Update assignment status to LOGGED
   assignment.status = 'logged';
   assignment.logged_allocation_id = allocationId;
   assignment.logged_at = now;
   assignment.logged_on_date = now;
   assignment.is_late_log = isLate;
   assignment.days_late = daysLate;
-  assignment.is_visible = false;
-  assignment.hidden_at = now;
-  assignment.hidden_reason = 'logged';
   
   await assignment.save();
+  
+  console.log(`[VerismaAssignment] Marked as logged: ${assignmentId}, allocation: ${allocationId}`);
   return assignment;
 };
 
-// Create assignments from resource's assigned locations
-VerismaAssignmentSchema.statics.createDailyAssignments = async function(resourceEmail, date, locations, resourceInfo = {}) {
-  const assignments = [];
-  const assignmentDate = new Date(date);
-  assignmentDate.setHours(0, 0, 0, 0);
+/**
+ * FIND ASSIGNMENT BY RESOURCE, DATE, AND LOCATION
+ * Used to link allocation entries to their assignments
+ */
+VerismaAssignmentSchema.statics.findAssignmentForEntry = async function(resourceEmail, assignmentDate, subprojectId) {
+  const startOfDay = new Date(assignmentDate);
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date(assignmentDate);
+  endOfDay.setHours(23, 59, 59, 999);
   
-  for (const location of locations) {
-    const subprojectKey = [
-      'verisma',
-      location.project_name?.toLowerCase().trim() || '',
-      location.subproject_name?.toLowerCase().trim() || ''
-    ].join('|');
-    
-    const existing = await this.findOne({
-      resource_email: resourceEmail.toLowerCase(),
-      assignment_date: assignmentDate,
-      subproject_key: subprojectKey
-    });
-    
-    if (!existing) {
-      assignments.push({
-        assignment_date: assignmentDate,
-        resource_email: resourceEmail.toLowerCase(),
-        resource_name: resourceInfo.name || location.resource_name || '',
-        resource_id: resourceInfo._id || location.resource_id,
-        geography_id: location.geography_id,
-        geography_name: location.geography_name,
-        geography_type: location.geography_type,
-        client_id: location.client_id,
-        client_name: 'Verisma',
-        project_id: location.project_id,
-        project_name: location.project_name,
-        subproject_id: location.subproject_id,
-        subproject_name: location.subproject_name,
-        subproject_key: subprojectKey,
-        status: 'pending',
-        is_visible: true,
-        source: 'auto_assign'
-      });
-    }
-  }
-  
-  if (assignments.length > 0) {
-    return this.insertMany(assignments, { ordered: false }).catch(err => {
-      if (err.code === 11000) {
-        console.log('Some Verisma assignments already exist, skipping duplicates');
-        return [];
-      }
-      throw err;
-    });
-  }
-  
-  return [];
+  return this.findOne({
+    resource_email: resourceEmail.toLowerCase(),
+    assignment_date: { $gte: startOfDay, $lte: endOfDay },
+    subproject_id: subprojectId,
+    status: 'pending' // Only find pending ones
+  });
 };
 
-// Hide past month assignments (run as cron job)
-VerismaAssignmentSchema.statics.hideExpiredAssignments = async function() {
-  const now = new Date();
-  const currentMonth = now.getMonth();
-  const currentYear = now.getFullYear();
-  
-  const lastDayPrevMonth = new Date(currentYear, currentMonth, 0);
-  
-  return this.updateMany(
-    {
-      status: 'pending',
-      is_visible: true,
-      assignment_date: { $lt: lastDayPrevMonth }
-    },
-    {
-      $set: {
-        is_visible: false,
-        hidden_at: now,
-        hidden_reason: 'month_end',
-        status: 'skipped'
-      }
-    }
-  );
-};
-
-// Get assignment statistics for a resource
+/**
+ * GET ASSIGNMENT STATS FOR RESOURCE
+ */
 VerismaAssignmentSchema.statics.getResourceStats = async function(resourceEmail, month, year) {
   return this.aggregate([
     {
@@ -242,20 +222,52 @@ VerismaAssignmentSchema.statics.getResourceStats = async function(resourceEmail,
   ]);
 };
 
-// Get late logs for admin tracking
-VerismaAssignmentSchema.statics.getLateLogs = async function(filters = {}) {
-  const query = { is_late_log: true };
+/**
+ * GET PENDING SUMMARY BY DATE
+ */
+VerismaAssignmentSchema.statics.getPendingSummary = async function(resourceEmail) {
+  return this.aggregate([
+    {
+      $match: {
+        resource_email: resourceEmail.toLowerCase(),
+        status: 'pending'
+      }
+    },
+    {
+      $group: {
+        _id: { $dateToString: { format: '%Y-%m-%d', date: '$assignment_date' } },
+        count: { $sum: 1 },
+        locations: { $push: '$subproject_name' }
+      }
+    },
+    { $sort: { _id: 1 } }
+  ]);
+};
+
+/**
+ * HIDE EXPIRED ASSIGNMENTS (for month-end cleanup)
+ */
+VerismaAssignmentSchema.statics.markExpiredAsSkipped = async function() {
+  const now = new Date();
+  const currentMonth = now.getMonth();
+  const currentYear = now.getFullYear();
   
-  if (filters.month && filters.year) {
-    query.month = parseInt(filters.month);
-    query.year = parseInt(filters.year);
-  }
+  // Last day of previous month
+  const lastDayPrevMonth = new Date(currentYear, currentMonth, 0);
   
-  if (filters.resource_email) {
-    query.resource_email = filters.resource_email.toLowerCase();
-  }
+  const result = await this.updateMany(
+    {
+      status: 'pending',
+      assignment_date: { $lt: lastDayPrevMonth }
+    },
+    {
+      $set: {
+        status: 'skipped'
+      }
+    }
+  );
   
-  return this.find(query).sort({ logged_on_date: -1 });
+  return result;
 };
 
 module.exports = mongoose.model('VerismaAssignment', VerismaAssignmentSchema);

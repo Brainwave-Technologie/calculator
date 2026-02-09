@@ -20,12 +20,6 @@ const navItems = [
   { name: "Productivity", icon: FaChartBar, path: "/productivity" },
   { name: "Costing", icon: CurrencyDollarIcon, path: "/costing" },
   { name: "Invoices", icon: Cog6ToothIcon, path: "/invoices" },
- 
-  
-  // { name: "Resource Management", icon: UsersIcon, path: "/resource-management" },
-  { name: "Resource Login Activity", icon: UsersIcon, path: "/resource-login-activity" },
-  { name: "Delete Requests", icon: UsersIcon, path: "/admin-delete-requests" },
-  { name: "Previous Cases", icon: UsersIcon, path: "/admin-previous-cases" },
   { name: "Resource Cases", icon: UsersIcon, path: "/admin-resource-cases" },
    { name: "Master Database", icon: FiDatabase, path: "/masterdatabase" },
   { name: "Settings", icon: CiSettings, path: "/settings" },

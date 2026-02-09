@@ -1,12 +1,13 @@
-// routes/verisma-daily-allocations.routes.js - Complete Verisma allocation routes
+// routes/verisma-daily-allocations.routes.js
+// FIXED: Proper assignment tracking - entries MUST come from assignments
 const express = require('express');
 const router = express.Router();
-const mongoose = require('mongoose');
 
 const VerismaDailyAllocation = require('../../models/Allocations/Verismadailyallocation');
 const VerismaAssignment = require('../../models/DailyAssignments/VerismaAssignment');
 const SubprojectRequestType = require('../../models/SubprojectRequestType');
 const ActivityLog = require('../../models/ActivityLog');
+const { sendDeleteRequestNotification, getAdminEmails } = require('../../services/emailNotifier');
 
 const { authenticateResource, authenticateUser } = require('../../middleware/auth');
 
@@ -14,7 +15,6 @@ const { authenticateResource, authenticateUser } = require('../../middleware/aut
 // HELPER FUNCTIONS
 // ═══════════════════════════════════════════════════════════════
 
-// Check if date is locked (EST timezone - month end)
 const isDateLocked = (date) => {
   const now = new Date();
   const estOffset = -5 * 60;
@@ -27,7 +27,6 @@ const isDateLocked = (date) => {
   return estNow > lockDate;
 };
 
-// Get next SR number
 const getNextSrNo = async (resourceEmail, date) => {
   const startOfDay = new Date(date);
   startOfDay.setHours(0, 0, 0, 0);
@@ -43,7 +42,6 @@ const getNextSrNo = async (resourceEmail, date) => {
   return lastEntry ? lastEntry.sr_no + 1 : 1;
 };
 
-// Get billing rate
 const getBillingRate = async (subprojectId, requestType) => {
   try {
     const rateRecord = await SubprojectRequestType.findOne({
@@ -56,7 +54,6 @@ const getBillingRate = async (subprojectId, requestType) => {
   }
 };
 
-// Check Request ID exists
 const checkRequestIdExists = async (requestId, excludeId = null) => {
   if (!requestId || requestId.trim() === '') return { exists: false };
   
@@ -81,94 +78,107 @@ const checkRequestIdExists = async (requestId, excludeId = null) => {
 // RESOURCE ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-// POST: Create new allocation
+/**
+ * GET: Pending assignments for resource
+ * Returns assignments that need to be logged
+ */
+router.get('/pending-assignments', authenticateResource, async (req, res) => {
+  try {
+    const result = await VerismaAssignment.getPendingAssignments(req.resource.email);
+    
+    res.json({
+      success: true,
+      count: result.assignments.length,
+      assignments: result.assignments,
+      has_previous_pending: result.has_previous_pending,
+      previous_pending_count: result.previous_pending_count,
+      blocked_message: result.blocked_message
+    });
+  } catch (error) {
+    console.error('Get pending assignments error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+/**
+ * GET: Pending summary by date
+ */
+router.get('/pending-summary', authenticateResource, async (req, res) => {
+  try {
+    const summary = await VerismaAssignment.getPendingSummary(req.resource.email);
+    const totalPending = summary.reduce((sum, s) => sum + s.count, 0);
+    
+    res.json({
+      success: true,
+      total_pending: totalPending,
+      by_date: summary
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+/**
+ * POST: Create new allocation entry
+ * MUST have assignment_id - entries come from pending assignments
+ */
 router.post('/', authenticateResource, async (req, res) => {
   try {
     const { 
-      subproject_id, 
-      allocation_date, 
-      process,           // NEW: Process field
-      facility,          // NEW: Facility field
+      assignment_id, // REQUIRED
+      facility,
       request_id, 
       request_type, 
       requestor_type, 
-      bronx_care_processing_time,  // NEW: Bronx Care Processing Time
+      bronx_care_processing_time,
       count, 
-      remark, 
-      geography_id, 
-      geography_name, 
-      assignment_id 
+      remark
     } = req.body;
     
-    if (!subproject_id || !allocation_date || !request_type) {
-      return res.status(400).json({ message: 'Location, allocation date, and request type are required' });
+    // ═══════════════════════════════════════════════════════════
+    // VALIDATE: Must have assignment_id
+    // ═══════════════════════════════════════════════════════════
+    if (!assignment_id) {
+      return res.status(400).json({ 
+        message: 'Assignment ID is required. Please select from your pending assignments.' 
+      });
     }
     
-    // CRITICAL: Prevent logging for FUTURE dates
-    const allocDateObj = new Date(allocation_date);
-    allocDateObj.setHours(0, 0, 0, 0);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    
-    if (allocDateObj > today) {
-      return res.status(400).json({ message: 'Cannot add entries for future dates. Please select today or a past date.' });
-    }
-    
-    if (isDateLocked(allocation_date)) {
-      return res.status(403).json({ message: 'Cannot add entries for locked month. Month has ended.' });
+    if (!request_type) {
+      return res.status(400).json({ message: 'Request type is required' });
     }
     
     const resource = req.resource;
-    let hasAccess = false;
-    let locationInfo = null;
-    let assignedDate = null;
-
-    for (const assignment of resource.assignments || []) {
-      if (assignment.client_name?.toLowerCase() !== 'verisma') continue;
-      for (const sp of assignment.subprojects || []) {
-        if (sp.subproject_id?.toString() === subproject_id && sp.status === 'active') {
-          // Get the assigned date for this location
-          assignedDate = sp.assigned_date ? new Date(sp.assigned_date) : null;
-          
-          if (assignedDate) {
-            assignedDate.setHours(0, 0, 0, 0);
-            // Check if assignment date is on or before allocation date
-            if (assignedDate <= allocDateObj) {
-              hasAccess = true;
-            }
-          } else {
-            // No assigned_date means it was assigned before we tracked dates - allow access
-            hasAccess = true;
-          }
-          
-          if (hasAccess) {
-            locationInfo = {
-              geography_id: geography_id || assignment.geography_id,
-              geography_name: geography_name || assignment.geography_name,
-              client_id: assignment.client_id,
-              client_name: 'Verisma',
-              project_id: assignment.project_id,
-              project_name: assignment.project_name,
-              subproject_id: sp.subproject_id,
-              subproject_name: sp.subproject_name,
-              subproject_key: sp.subproject_key
-            };
-          }
-          break;
-        }
-      }
-      if (hasAccess) break;
-    }
-
-    if (!hasAccess) {
-      if (assignedDate) {
-        return res.status(403).json({ 
-          message: `Cannot log for ${allocation_date}. This location was assigned to you on ${assignedDate.toISOString().split('T')[0]}. You can only log entries from the assignment date onwards.`
-        });
-      }
-      return res.status(403).json({ message: 'You do not have access to this Verisma location' });
+    
+    // ═══════════════════════════════════════════════════════════
+    // FIND AND VALIDATE ASSIGNMENT
+    // ═══════════════════════════════════════════════════════════
+    const assignment = await VerismaAssignment.findById(assignment_id);
+    
+    if (!assignment) {
+      return res.status(404).json({ message: 'Assignment not found' });
     }
     
+    // Verify ownership
+    if (assignment.resource_email.toLowerCase() !== resource.email.toLowerCase()) {
+      return res.status(403).json({ message: 'This assignment is not assigned to you' });
+    }
+    
+    // Check if already logged
+    if (assignment.status === 'logged') {
+      return res.status(400).json({ 
+        message: 'This assignment has already been logged. It should not appear in your pending list.' 
+      });
+    }
+    
+    // Check if date is locked
+    if (isDateLocked(assignment.assignment_date)) {
+      return res.status(403).json({ message: 'Cannot add entries for locked month.' });
+    }
+    
+    // ═══════════════════════════════════════════════════════════
+    // REQUEST ID VALIDATION
+    // ═══════════════════════════════════════════════════════════
     if (request_type === 'New Request' && request_id && request_id.trim() !== '') {
       const requestCheck = await checkRequestIdExists(request_id);
       if (requestCheck.exists) {
@@ -179,31 +189,40 @@ router.post('/', authenticateResource, async (req, res) => {
       }
     }
     
-    const billingRate = await getBillingRate(subproject_id, request_type);
+    // ═══════════════════════════════════════════════════════════
+    // CREATE ALLOCATION ENTRY
+    // ═══════════════════════════════════════════════════════════
+    const billingRate = await getBillingRate(assignment.subproject_id, request_type);
     const entryCount = parseInt(count) || 1;
-    const srNo = await getNextSrNo(resource.email, allocation_date);
+    const srNo = await getNextSrNo(resource.email, assignment.assignment_date);
+    
+    // Calculate late log
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const allocDateNorm = new Date(assignment.assignment_date);
+    allocDateNorm.setHours(0, 0, 0, 0);
+    const isLateLog = today > allocDateNorm;
+    const daysLate = isLateLog ? Math.floor((today - allocDateNorm) / (1000 * 60 * 60 * 24)) : 0;
     
     const allocation = new VerismaDailyAllocation({
       sr_no: srNo,
-      allocation_date: new Date(allocation_date),
+      allocation_date: assignment.assignment_date,
       logged_date: new Date(),
       resource_id: resource._id,
       resource_name: resource.name,
       resource_email: resource.email,
-      geography_id: locationInfo.geography_id,
-      geography_name: locationInfo.geography_name,
-      client_id: locationInfo.client_id,
+      geography_id: assignment.geography_id,
+      geography_name: assignment.geography_name,
+      client_id: assignment.client_id,
       client_name: 'Verisma',
-      project_id: locationInfo.project_id,
-      project_name: locationInfo.project_name,
-      subproject_id: locationInfo.subproject_id,
-      subproject_name: locationInfo.subproject_name,
-      subproject_key: locationInfo.subproject_key,
-      // New fields from Excel
-      process: process || locationInfo.project_name || '',
+      project_id: assignment.project_id,
+      project_name: assignment.project_name,
+      subproject_id: assignment.subproject_id,
+      subproject_name: assignment.subproject_name,
+      subproject_key: assignment.subproject_key,
+      process: assignment.project_name || '',
       facility: facility || '',
       bronx_care_processing_time: bronx_care_processing_time || '',
-      // Existing fields
       request_id: request_id || '',
       request_type,
       requestor_type: requestor_type || '',
@@ -212,16 +231,20 @@ router.post('/', authenticateResource, async (req, res) => {
       billing_rate: billingRate,
       billing_amount: billingRate * entryCount,
       billing_rate_at_logging: billingRate,
-      source: assignment_id ? 'assignment' : 'direct_entry',
-      assignment_id,
+      source: 'assignment',
+      assignment_id: assignment._id,
+      is_late_log: isLateLog,
+      days_late: daysLate,
       is_locked: false
     });
     
     await allocation.save();
     
-    if (assignment_id) {
-      try { await VerismaAssignment.markAsLogged(assignment_id, allocation._id); } catch (err) {}
-    }
+    // ═══════════════════════════════════════════════════════════
+    // CRITICAL: MARK ASSIGNMENT AS LOGGED
+    // This removes it from the pending list
+    // ═══════════════════════════════════════════════════════════
+    await VerismaAssignment.markAsLogged(assignment._id, allocation._id);
     
     // Activity Log
     try {
@@ -231,21 +254,34 @@ router.post('/', authenticateResource, async (req, res) => {
         actor_id: resource._id,
         actor_email: resource.email,
         actor_name: resource.name,
-        resource_id: resource._id,
-        resource_email: resource.email,
-        resource_name: resource.name,
         client_name: 'Verisma',
-        project_name: locationInfo.project_name,
-        subproject_name: locationInfo.subproject_name,
-        subproject_key: locationInfo.subproject_key,
+        project_name: assignment.project_name,
+        subproject_name: assignment.subproject_name,
         allocation_id: allocation._id,
         allocation_date: allocation.allocation_date,
         request_type,
-        details: { sr_no: srNo, count: entryCount, request_id: request_id || '', requestor_type: requestor_type || '' }
+        details: { 
+          sr_no: srNo, 
+          count: entryCount, 
+          assignment_id: assignment._id.toString(),
+          is_late_log: isLateLog,
+          days_late: daysLate
+        }
       });
-    } catch (logErr) {}
+    } catch (logErr) {
+      console.log('Activity log error (non-fatal):', logErr.message);
+    }
     
-    res.status(201).json({ success: true, message: 'Entry created successfully', allocation });
+    // Get updated pending count
+    const pendingResult = await VerismaAssignment.getPendingAssignments(resource.email);
+    
+    res.status(201).json({ 
+      success: true, 
+      message: 'Entry logged successfully. Assignment marked as complete.',
+      allocation,
+      remaining_pending: pendingResult.assignments.length,
+      has_previous_pending: pendingResult.has_previous_pending
+    });
     
   } catch (error) {
     console.error('Create Verisma allocation error:', error);
@@ -253,7 +289,9 @@ router.post('/', authenticateResource, async (req, res) => {
   }
 });
 
-// GET: My allocations
+/**
+ * GET: My allocations for a specific date
+ */
 router.get('/my-allocations', authenticateResource, async (req, res) => {
   try {
     const { date } = req.query;
@@ -270,100 +308,224 @@ router.get('/my-allocations', authenticateResource, async (req, res) => {
       is_deleted: { $ne: true }
     }).sort({ sr_no: -1 }).lean();
     
-    const allocationsWithLockStatus = allocations.map(a => ({
-      ...a,
-      is_locked: a.is_locked || isDateLocked(a.allocation_date)
-    }));
-    
-    res.json({ success: true, date: targetDate.toISOString().split('T')[0], count: allocations.length, allocations: allocationsWithLockStatus });
+    res.json({ 
+      success: true, 
+      date: targetDate.toISOString().split('T')[0], 
+      count: allocations.length, 
+      allocations 
+    });
     
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// GET: Pending assignments
-router.get('/pending-assignments', authenticateResource, async (req, res) => {
+/**
+ * GET: My stats/summary (for dashboard)
+ */
+router.get('/my-stats', authenticateResource, async (req, res) => {
   try {
-    const assignments = await VerismaAssignment.getPendingAssignments(req.resource.email);
-    res.json({ success: true, count: assignments.length, assignments });
+    const { month, year, from_date, to_date } = req.query;
+    const resourceEmail = req.resource.email.toLowerCase();
+    
+    // Build date filter
+    let dateFilter = {};
+    if (from_date) {
+      dateFilter = { $gte: new Date(from_date) };
+      if (to_date) {
+        const end = new Date(to_date);
+        end.setHours(23, 59, 59, 999);
+        dateFilter.$lte = end;
+      }
+    } else if (month && year) {
+      const m = parseInt(month);
+      const y = parseInt(year);
+      const startDate = new Date(y, m - 1, 1);
+      const endDate = new Date(y, m, 0, 23, 59, 59, 999);
+      dateFilter = { $gte: startDate, $lte: endDate };
+    }
+    
+    const matchQuery = {
+      resource_email: resourceEmail,
+      is_deleted: { $ne: true }
+    };
+    
+    if (Object.keys(dateFilter).length > 0) {
+      matchQuery.allocation_date = dateFilter;
+    }
+    
+    // Total count
+    const totalAgg = await VerismaDailyAllocation.aggregate([
+      { $match: matchQuery },
+      { $group: { _id: null, total_entries: { $sum: 1 }, total_count: { $sum: '$count' }, total_billing: { $sum: '$billing_amount' } } }
+    ]);
+    
+    const totals = totalAgg[0] || { total_entries: 0, total_count: 0, total_billing: 0 };
+    
+    // By request type
+    const byRequestType = await VerismaDailyAllocation.aggregate([
+      { $match: matchQuery },
+      { $group: { _id: '$request_type', entries: { $sum: 1 }, count: { $sum: '$count' } } },
+      { $sort: { count: -1 } }
+    ]);
+    
+    // By process type (Processing vs Logging/Complete logging)
+    const byProcessType = await VerismaDailyAllocation.aggregate([
+      { $match: matchQuery },
+      { $group: { _id: '$process_type', entries: { $sum: 1 }, count: { $sum: '$count' } } },
+      { $sort: { count: -1 } }
+    ]);
+    
+    // Pending delete requests
+    const pendingDeletes = await VerismaDailyAllocation.countDocuments({
+      resource_email: resourceEmail,
+      has_pending_delete_request: true,
+      is_deleted: { $ne: true }
+    });
+    
+    // Pending assignments
+    const pendingResult = await VerismaAssignment.getPendingAssignments(resourceEmail);
+    
+    res.json({
+      success: true,
+      client: 'Verisma',
+      total_entries: totals.total_entries,
+      total_cases: totals.total_count,
+      total_billing: totals.total_billing,
+      pending_delete_requests: pendingDeletes,
+      pending_assignments: pendingResult.assignments.length,
+      has_previous_pending: pendingResult.has_previous_pending,
+      by_request_type: byRequestType,
+      by_process_type: byProcessType
+    });
+    
   } catch (error) {
+    console.error('My stats error:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// GET: Previous cases (ONLY before today, with lock check)
+/**
+ * GET: Previous cases
+ * Supports both month/year and from_date/to_date filtering
+ */
 router.get('/previous-cases', authenticateResource, async (req, res) => {
   try {
-    const { month, year, subproject_id, subproject_key, request_type, request_id, page = 1, limit = 50 } = req.query;
-    
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const { month, year, from_date, to_date, subproject_id, request_type, request_id, page = 1, limit = 50 } = req.query;
     
     const query = {
       resource_email: req.resource.email.toLowerCase(),
-      is_deleted: { $ne: true },
-      logged_date: { $lt: today }
+      is_deleted: { $ne: true }
     };
     
-    if (month && year) { query.month = parseInt(month); query.year = parseInt(year); }
+    // Date filtering - prioritize from_date/to_date over month/year
+    if (from_date || to_date) {
+      query.allocation_date = {};
+      if (from_date) {
+        const start = new Date(from_date);
+        start.setHours(0, 0, 0, 0);
+        query.allocation_date.$gte = start;
+      }
+      if (to_date) {
+        const end = new Date(to_date);
+        end.setHours(23, 59, 59, 999);
+        query.allocation_date.$lte = end;
+      }
+    } else if (month && year) {
+      // Use month/year filter
+      const m = parseInt(month);
+      const y = parseInt(year);
+      const startDate = new Date(y, m - 1, 1);
+      const endDate = new Date(y, m, 0, 23, 59, 59, 999);
+      query.allocation_date = { $gte: startDate, $lte: endDate };
+    }
+    
     if (subproject_id) query.subproject_id = subproject_id;
-    if (subproject_key) query.subproject_key = subproject_key;
     if (request_type) query.request_type = request_type;
     if (request_id) query.request_id = { $regex: request_id, $options: 'i' };
     
     const total = await VerismaDailyAllocation.countDocuments(query);
     const skip = (parseInt(page) - 1) * parseInt(limit);
     
-    const allocations = await VerismaDailyAllocation.find(query).sort({ allocation_date: -1, sr_no: -1 }).skip(skip).limit(parseInt(limit)).lean();
+    const allocations = await VerismaDailyAllocation.find(query)
+      .sort({ allocation_date: -1, sr_no: -1 })
+      .skip(skip)
+      .limit(parseInt(limit))
+      .lean();
     
     const allocationsWithLockStatus = allocations.map(a => ({
       ...a,
       is_locked: a.is_locked || isDateLocked(a.allocation_date)
     }));
     
-    res.json({ success: true, total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)), allocations: allocationsWithLockStatus });
+    res.json({ 
+      success: true, 
+      total, 
+      page: parseInt(page), 
+      pages: Math.ceil(total / parseInt(limit)), 
+      allocations: allocationsWithLockStatus 
+    });
     
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// PUT: Edit allocation (with change reason and lock check)
+/**
+ * PUT: Edit allocation
+ */
 router.put('/:id', authenticateResource, async (req, res) => {
   try {
     const { id } = req.params;
     const { change_reason, change_notes, request_id, request_type, requestor_type, count, remark } = req.body;
     
     if (!change_reason || change_reason.trim() === '') {
-      return res.status(400).json({ message: 'Change reason is required for editing' });
+      return res.status(400).json({ message: 'Change reason is required' });
     }
     
     const allocation = await VerismaDailyAllocation.findById(id);
     if (!allocation) return res.status(404).json({ message: 'Allocation not found' });
+    
     if (allocation.resource_id.toString() !== req.resource._id.toString()) {
       return res.status(403).json({ message: 'You can only edit your own entries' });
     }
+    
     if (allocation.is_locked || isDateLocked(allocation.allocation_date)) {
-      return res.status(403).json({ message: 'This entry is locked and cannot be modified' });
+      return res.status(403).json({ message: 'This entry is locked' });
     }
     
+    // Request ID check
     if (request_type === 'New Request' && request_id && request_id.trim() !== '') {
       const requestCheck = await checkRequestIdExists(request_id, id);
       if (requestCheck.exists) {
-        return res.status(400).json({ message: `Request ID "${request_id}" already has a "New Request" entry.`, suggested_type: requestCheck.suggestedType });
+        return res.status(400).json({ message: `Request ID already has "New Request"` });
       }
     }
     
     const fieldsChanged = [];
-    if (request_id !== undefined && request_id !== allocation.request_id) { fieldsChanged.push({ field: 'request_id', old_value: allocation.request_id, new_value: request_id }); allocation.request_id = request_id; }
-    if (request_type !== undefined && request_type !== allocation.request_type) { fieldsChanged.push({ field: 'request_type', old_value: allocation.request_type, new_value: request_type }); allocation.request_type = request_type; }
-    if (requestor_type !== undefined && requestor_type !== allocation.requestor_type) { fieldsChanged.push({ field: 'requestor_type', old_value: allocation.requestor_type, new_value: requestor_type }); allocation.requestor_type = requestor_type; }
-    if (count !== undefined && parseInt(count) !== allocation.count) { fieldsChanged.push({ field: 'count', old_value: allocation.count, new_value: parseInt(count) }); allocation.count = parseInt(count) || 1; }
-    if (remark !== undefined && remark !== allocation.remark) { fieldsChanged.push({ field: 'remark', old_value: allocation.remark, new_value: remark }); allocation.remark = remark; }
+    if (request_id !== undefined && request_id !== allocation.request_id) { 
+      fieldsChanged.push({ field: 'request_id', old_value: allocation.request_id, new_value: request_id }); 
+      allocation.request_id = request_id; 
+    }
+    if (request_type !== undefined && request_type !== allocation.request_type) { 
+      fieldsChanged.push({ field: 'request_type', old_value: allocation.request_type, new_value: request_type }); 
+      allocation.request_type = request_type; 
+    }
+    if (requestor_type !== undefined && requestor_type !== allocation.requestor_type) { 
+      fieldsChanged.push({ field: 'requestor_type', old_value: allocation.requestor_type, new_value: requestor_type }); 
+      allocation.requestor_type = requestor_type; 
+    }
+    if (count !== undefined && parseInt(count) !== allocation.count) { 
+      fieldsChanged.push({ field: 'count', old_value: allocation.count, new_value: parseInt(count) }); 
+      allocation.count = parseInt(count) || 1; 
+    }
+    if (remark !== undefined && remark !== allocation.remark) { 
+      fieldsChanged.push({ field: 'remark', old_value: allocation.remark, new_value: remark }); 
+      allocation.remark = remark; 
+    }
     
     if (fieldsChanged.length === 0) {
-      return res.json({ success: true, message: 'No changes detected', allocation });
+      return res.json({ success: true, message: 'No changes', allocation });
     }
     
     // Recalculate billing
@@ -388,35 +550,16 @@ router.put('/:id', authenticateResource, async (req, res) => {
     
     await allocation.save();
     
-    // Activity Log
-    try {
-      await ActivityLog.create({
-        activity_type: 'CASE_UPDATED',
-        actor_type: 'resource',
-        actor_id: req.resource._id,
-        actor_email: req.resource.email,
-        actor_name: req.resource.name,
-        resource_id: req.resource._id,
-        resource_email: req.resource.email,
-        resource_name: req.resource.name,
-        client_name: 'Verisma',
-        project_name: allocation.project_name,
-        subproject_name: allocation.subproject_name,
-        subproject_key: allocation.subproject_key,
-        allocation_id: allocation._id,
-        allocation_date: allocation.allocation_date,
-        details: { change_reason, change_notes, fields_changed: fieldsChanged.map(f => f.field), edit_count: allocation.edit_count }
-      });
-    } catch (logErr) {}
-    
-    res.json({ success: true, message: 'Entry updated successfully', allocation });
+    res.json({ success: true, message: 'Updated', allocation });
     
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
 });
 
-// POST: Request deletion
+/**
+ * POST: Request deletion
+ */
 router.post('/:id/request-delete', authenticateResource, async (req, res) => {
   try {
     const { id } = req.params;
@@ -427,15 +570,18 @@ router.post('/:id/request-delete', authenticateResource, async (req, res) => {
     }
     
     const allocation = await VerismaDailyAllocation.findById(id);
-    if (!allocation) return res.status(404).json({ message: 'Allocation not found' });
+    if (!allocation) return res.status(404).json({ message: 'Not found' });
+    
     if (allocation.resource_id.toString() !== req.resource._id.toString()) {
-      return res.status(403).json({ message: 'You can only delete your own entries' });
+      return res.status(403).json({ message: 'Not your entry' });
     }
+    
     if (allocation.is_locked || isDateLocked(allocation.allocation_date)) {
-      return res.status(403).json({ message: 'This entry is locked and cannot be deleted' });
+      return res.status(403).json({ message: 'Locked' });
     }
+    
     if (allocation.has_pending_delete_request) {
-      return res.status(400).json({ message: 'Delete request already pending for this entry' });
+      return res.status(400).json({ message: 'Already pending' });
     }
     
     allocation.delete_request = {
@@ -450,72 +596,62 @@ router.post('/:id/request-delete', authenticateResource, async (req, res) => {
     
     await allocation.save();
     
-    // Activity Log
+    // Email notification
     try {
-      await ActivityLog.create({
-        activity_type: 'CASE_DELETED',
-        actor_type: 'resource',
-        actor_id: req.resource._id,
-        actor_email: req.resource.email,
-        actor_name: req.resource.name,
-        resource_id: req.resource._id,
-        resource_email: req.resource.email,
-        resource_name: req.resource.name,
-        client_name: 'Verisma',
-        allocation_id: allocation._id,
-        allocation_date: allocation.allocation_date,
-        details: { action: 'delete_requested', delete_reason }
+      const adminEmails = await getAdminEmails();
+      await sendDeleteRequestNotification({
+        adminEmails,
+        resourceName: req.resource.name,
+        resourceEmail: req.resource.email,
+        clientName: 'Verisma',
+        allocationId: allocation._id,
+        allocationDate: allocation.allocation_date,
+        subprojectName: allocation.subproject_name,
+        requestId: allocation.request_id,
+        requestType: allocation.request_type,
+        deleteReason: delete_reason
       });
-    } catch (logErr) {}
+    } catch (emailErr) {
+      console.log('Email error:', emailErr.message);
+    }
     
-    res.json({ success: true, message: 'Delete request submitted for admin approval', allocation });
+    res.json({ success: true, message: 'Delete request submitted', allocation });
     
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
 });
 
-// GET: Check Request ID
+/**
+ * GET: Check Request ID
+ */
 router.get('/check-request-id', authenticateResource, async (req, res) => {
   try {
     const { request_id } = req.query;
     if (!request_id || request_id.trim() === '') {
-      return res.json({ 
-        exists: false, 
-        has_new_request: false,
-        suggested_type: 'New Request',
-        existing_entries: []
-      });
+      return res.json({ exists: false, suggested_type: 'New Request' });
     }
     
-    // Find ALL entries with this request_id (not just "New Request")
     const allEntries = await VerismaDailyAllocation.find({
       request_id: request_id.trim(),
       is_deleted: { $ne: true }
     }).sort({ allocation_date: -1 }).lean();
     
-    // Check if any entry is "New Request"
     const hasNewRequest = allEntries.some(e => e.request_type === 'New Request');
-    
-    // Format existing entries for response
-    const existingEntries = allEntries.map(e => ({
-      id: e._id,
-      request_type: e.request_type,
-      allocation_date: e.allocation_date ? new Date(e.allocation_date).toISOString().split('T')[0] : null,
-      location: e.subproject_name,
-      resource_name: e.resource_name,
-      logged_date: e.logged_date
-    }));
     
     res.json({
       exists: allEntries.length > 0,
       has_new_request: hasNewRequest,
-      suggested_type: hasNewRequest ? 'Duplicate' : 'New Request', // For Verisma: Duplicate; For MRO: Follow up
-      existing_entries: existingEntries,
+      suggested_type: hasNewRequest ? 'Duplicate' : 'New Request',
+      existing_entries: allEntries.map(e => ({
+        id: e._id,
+        request_type: e.request_type,
+        allocation_date: e.allocation_date,
+        location: e.subproject_name
+      })),
       total_entries: allEntries.length
     });
   } catch (error) {
-    console.error('Check request ID error:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -524,53 +660,91 @@ router.get('/check-request-id', authenticateResource, async (req, res) => {
 // ADMIN ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-// GET: All allocations
-router.get('/admin/all', authenticateUser, async (req, res) => {
+/**
+ * GET: All assignments (admin view)
+ */
+router.get('/admin/assignments', authenticateUser, async (req, res) => {
   try {
-    const { month, year, resource_email, subproject_key, request_type, include_deleted, page = 1, limit = 100 } = req.query;
+    const { month, year, status, resource_email, page = 1, limit = 100 } = req.query;
     
     const query = {};
     if (month) query.month = parseInt(month);
     if (year) query.year = parseInt(year);
+    if (status) query.status = status;
     if (resource_email) query.resource_email = resource_email.toLowerCase();
-    if (subproject_key) query.subproject_key = subproject_key;
-    if (request_type) query.request_type = request_type;
-    if (!include_deleted) query.is_deleted = { $ne: true };
     
-    const total = await VerismaDailyAllocation.countDocuments(query);
-    const allocations = await VerismaDailyAllocation.find(query).sort({ allocation_date: -1, sr_no: -1 }).skip((parseInt(page) - 1) * parseInt(limit)).limit(parseInt(limit)).lean();
+    const total = await VerismaAssignment.countDocuments(query);
+    const assignments = await VerismaAssignment.find(query)
+      .sort({ assignment_date: -1, resource_name: 1 })
+      .skip((parseInt(page) - 1) * parseInt(limit))
+      .limit(parseInt(limit))
+      .lean();
     
-    const allocationsWithLockStatus = allocations.map(a => ({ ...a, is_locked: a.is_locked || isDateLocked(a.allocation_date) }));
+    res.json({ success: true, total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)), assignments });
     
-    res.json({ success: true, total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)), allocations: allocationsWithLockStatus });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// GET: Pending delete requests
+/**
+ * GET: All allocations (admin)
+ */
+router.get('/admin/all', authenticateUser, async (req, res) => {
+  try {
+    const { month, year, resource_email, request_type, include_deleted, page = 1, limit = 100 } = req.query;
+    
+    const query = {};
+    if (month) query.month = parseInt(month);
+    if (year) query.year = parseInt(year);
+    if (resource_email) query.resource_email = resource_email.toLowerCase();
+    if (request_type) query.request_type = request_type;
+    if (!include_deleted) query.is_deleted = { $ne: true };
+    
+    const total = await VerismaDailyAllocation.countDocuments(query);
+    const allocations = await VerismaDailyAllocation.find(query)
+      .sort({ allocation_date: -1, sr_no: -1 })
+      .skip((parseInt(page) - 1) * parseInt(limit))
+      .limit(parseInt(limit))
+      .lean();
+    
+    res.json({ success: true, total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)), allocations });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+/**
+ * GET: Pending delete requests (admin)
+ */
 router.get('/admin/delete-requests', authenticateUser, async (req, res) => {
   try {
-    const requests = await VerismaDailyAllocation.find({ has_pending_delete_request: true, is_deleted: { $ne: true } }).sort({ 'delete_request.requested_at': -1 }).lean();
+    const requests = await VerismaDailyAllocation.find({ 
+      has_pending_delete_request: true, 
+      is_deleted: { $ne: true } 
+    }).sort({ 'delete_request.requested_at': -1 }).lean();
+    
     res.json({ success: true, count: requests.length, requests });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// POST: Review delete request
+/**
+ * POST: Review delete request (admin)
+ */
 router.post('/admin/review-delete/:id', authenticateUser, async (req, res) => {
   try {
     const { id } = req.params;
     const { action, comment, delete_type } = req.body;
     
     if (!['approve', 'reject'].includes(action)) {
-      return res.status(400).json({ message: 'Action must be "approve" or "reject"' });
+      return res.status(400).json({ message: 'Invalid action' });
     }
     
     const allocation = await VerismaDailyAllocation.findById(id);
-    if (!allocation) return res.status(404).json({ message: 'Allocation not found' });
-    if (!allocation.has_pending_delete_request) return res.status(400).json({ message: 'No pending delete request' });
+    if (!allocation) return res.status(404).json({ message: 'Not found' });
+    if (!allocation.has_pending_delete_request) return res.status(400).json({ message: 'No pending request' });
     
     allocation.delete_request.reviewed_at = new Date();
     allocation.delete_request.reviewed_by_id = req.user._id;
@@ -579,12 +753,9 @@ router.post('/admin/review-delete/:id', authenticateUser, async (req, res) => {
     
     if (action === 'approve') {
       allocation.delete_request.status = 'approved';
-      allocation.delete_request.delete_type = delete_type || 'soft';
-      
       if (delete_type === 'hard') {
         await allocation.deleteOne();
-        await ActivityLog.create({ activity_type: 'CASE_DELETED', actor_type: 'admin', actor_email: req.user.email, client_name: 'Verisma', allocation_id: id, details: { action: 'delete_approved', delete_type: 'hard', comment } });
-        return res.json({ success: true, message: 'Delete request approved - entry permanently deleted' });
+        return res.json({ success: true, message: 'Permanently deleted' });
       } else {
         allocation.is_deleted = true;
         allocation.deleted_at = new Date();
@@ -597,76 +768,9 @@ router.post('/admin/review-delete/:id', authenticateUser, async (req, res) => {
     allocation.has_pending_delete_request = false;
     await allocation.save();
     
-    await ActivityLog.create({ activity_type: 'CASE_DELETED', actor_type: 'admin', actor_email: req.user.email, client_name: 'Verisma', allocation_id: allocation._id, details: { action: `delete_${action}ed`, delete_type: action === 'approve' ? (delete_type || 'soft') : null, comment } });
-    
-    res.json({ success: true, message: `Delete request ${action}ed`, allocation });
+    res.json({ success: true, message: `Delete ${action}ed`, allocation });
   } catch (error) {
     res.status(400).json({ message: error.message });
-  }
-});
-
-// PUT: Admin edit
-router.put('/admin/:id', authenticateUser, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { change_reason, change_notes, ...updates } = req.body;
-    
-    if (!change_reason || change_reason.trim() === '') {
-      return res.status(400).json({ message: 'Change reason is required for editing' });
-    }
-    
-    const allocation = await VerismaDailyAllocation.findById(id);
-    if (!allocation) return res.status(404).json({ message: 'Allocation not found' });
-    
-    const fieldsChanged = [];
-    for (const [field, newValue] of Object.entries(updates)) {
-      if (allocation[field] !== newValue) {
-        fieldsChanged.push({ field, old_value: allocation[field], new_value: newValue });
-        allocation[field] = newValue;
-      }
-    }
-    
-    if (fieldsChanged.length === 0) return res.json({ success: true, message: 'No changes detected', allocation });
-    
-    if (!allocation.edit_history) allocation.edit_history = [];
-    allocation.edit_history.push({ edited_at: new Date(), edited_by_id: req.user._id, edited_by_email: req.user.email, edited_by_name: req.user.name || 'Admin', editor_type: 'admin', change_reason, change_notes: change_notes || '', fields_changed: fieldsChanged });
-    allocation.last_edited_at = new Date();
-    allocation.edit_count = (allocation.edit_count || 0) + 1;
-    
-    await allocation.save();
-    await ActivityLog.create({ activity_type: 'CASE_UPDATED', actor_type: 'admin', actor_email: req.user.email, client_name: 'Verisma', allocation_id: allocation._id, details: { change_reason, change_notes, fields_changed: fieldsChanged.map(f => f.field) } });
-    
-    res.json({ success: true, message: 'Entry updated by admin', allocation });
-  } catch (error) {
-    res.status(400).json({ message: error.message });
-  }
-});
-
-// GET: Late logs
-router.get('/admin/late-logs', authenticateUser, async (req, res) => {
-  try {
-    const { month, year, resource_email } = req.query;
-    const query = { is_late_log: true, is_deleted: { $ne: true } };
-    if (month) query.month = parseInt(month);
-    if (year) query.year = parseInt(year);
-    if (resource_email) query.resource_email = resource_email.toLowerCase();
-    
-    const lateLogs = await VerismaDailyAllocation.find(query).sort({ logged_date: -1 }).lean();
-    res.json({ success: true, count: lateLogs.length, data: lateLogs });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// GET: Edit history
-router.get('/admin/:id/history', authenticateUser, async (req, res) => {
-  try {
-    const allocation = await VerismaDailyAllocation.findById(req.params.id).select('edit_history edit_count last_edited_at resource_name subproject_name');
-    if (!allocation) return res.status(404).json({ message: 'Allocation not found' });
-    
-    res.json({ success: true, allocation_info: { resource_name: allocation.resource_name, location: allocation.subproject_name }, edit_count: allocation.edit_count, last_edited_at: allocation.last_edited_at, history: (allocation.edit_history || []).sort((a, b) => b.edited_at - a.edited_at) });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
   }
 });
 

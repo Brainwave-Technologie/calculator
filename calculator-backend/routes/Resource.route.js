@@ -470,65 +470,94 @@ router.get('/', authenticateUser, async (req, res) => {
   }
 });
 
-
-
-// POST: Create resource (Admin)
+// ═══════════════════════════════════════════════════════════════
+// POST: Create resource (Admin) 
+// UPDATED: If resource already exists, don't error - proceed to assign locations
+// ═══════════════════════════════════════════════════════════════
 router.post('/', authenticateUser, async (req, res) => {
   try {
-    const { name, email, role, assignments } = req.body;
+    const { name, email, role, employee_id, assignments } = req.body;
     
     if (!name || !email) {
       return res.status(400).json({ message: 'Name and email are required' });
     }
     
+    const normalizedEmail = email.toLowerCase().trim();
+    
     // Check if email already exists
-    const existing = await Resource.findByEmail(email);
-    if (existing) {
-      return res.status(400).json({ message: 'Resource with this email already exists' });
+    let resource = await Resource.findByEmail(normalizedEmail);
+    let isExisting = false;
+    
+    if (resource) {
+      // ═══════════════════════════════════════════════════════════════
+      // RESOURCE EXISTS - Don't error, just return it for location assignment
+      // ═══════════════════════════════════════════════════════════════
+      isExisting = true;
+      
+      // Optionally update name/role/employee_id if provided
+      if (name && name !== resource.name) resource.name = name;
+      if (role && role !== resource.role) resource.role = role;
+      if (employee_id && employee_id !== resource.employee_id) resource.employee_id = employee_id;
+      
+      // Ensure resource is active
+      resource.status = 'active';
+      resource.is_active = true;
+      resource.updated_by = req.user?.email || 'admin';
+      
+      await resource.save();
+    } else {
+      // Create new resource
+      resource = new Resource({
+        name,
+        email: normalizedEmail,
+        email_normalized: normalizedEmail,
+        role: role || 'associate',
+        employee_id: employee_id || '',
+        status: 'active',
+        is_active: true,
+        assignments: [],
+        created_by: req.user?.email || 'admin'
+      });
+      
+      await resource.save();
     }
     
-    // Process assignments with assigned_date
-    const processedAssignments = [];
-    const assignedDate = new Date();
-    
-    if (assignments && Array.isArray(assignments)) {
+    // Process assignments if provided (for both new and existing)
+    if (assignments && Array.isArray(assignments) && assignments.length > 0) {
+      const assignedDate = new Date();
+      const adminEmail = req.user?.email || 'admin';
+      
       for (const assignment of assignments) {
-        const processedSubprojects = [];
-        
         for (const sp of assignment.subprojects || []) {
-          processedSubprojects.push({
-            subproject_id: sp.subproject_id,
-            subproject_name: sp.subproject_name,
-            subproject_key: sp.subproject_key,
-            assigned_date: sp.assigned_date || assignedDate,
-            assigned_by: req.user?.email || 'admin',
-            status: 'active'
-          });
+          try {
+            await Resource.addAssignment(normalizedEmail, {
+              geography_id: assignment.geography_id,
+              geography_name: assignment.geography_name,
+              client_id: assignment.client_id,
+              client_name: assignment.client_name,
+              project_id: assignment.project_id,
+              project_name: assignment.project_name,
+              subproject_id: sp.subproject_id,
+              subproject_name: sp.subproject_name,
+              subproject_key: sp.subproject_key,
+              assigned_date: sp.assigned_date || assignedDate
+            }, adminEmail);
+          } catch (assignErr) {
+            console.log('Assignment error (non-fatal):', assignErr.message);
+          }
         }
-        
-        processedAssignments.push({
-          ...assignment,
-          subprojects: processedSubprojects
-        });
       }
+      
+      // Refresh resource data after assignments
+      resource = await Resource.findByEmail(normalizedEmail);
     }
     
-    const resource = new Resource({
-      name,
-      email,
-      email_normalized: email.toLowerCase().trim(),
-      role: role || 'associate',
-      status: 'active',
-      is_active: true,
-      assignments: processedAssignments,
-      created_by: req.user?.email || 'admin'
-    });
-    
-    await resource.save();
-    
-    res.status(201).json({
+    res.status(isExisting ? 200 : 201).json({
       success: true,
-      message: 'Resource created successfully',
+      message: isExisting 
+        ? 'Resource already exists. You can assign locations.' 
+        : 'Resource created successfully',
+      is_existing: isExisting,
       resource
     });
     
@@ -537,6 +566,8 @@ router.post('/', authenticateUser, async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 });
+
+// GET: Login activity (Admin)
 router.get('/login-activity', authenticateUser, async (req, res) => {
   try {
     const { sort_by = 'last_login', sort_order = 'desc', page = 1, limit = 50 } = req.query;
@@ -600,6 +631,7 @@ router.get('/:id', authenticateUser, async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 });
+
 // PUT: Update resource (Admin)
 router.put('/:id', authenticateUser, async (req, res) => {
   try {
@@ -625,7 +657,6 @@ router.put('/:id', authenticateUser, async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 });
-
 
 // POST: Add assignment to resource (Admin)
 router.post('/:id/assignments', authenticateUser, async (req, res) => {
@@ -755,13 +786,6 @@ router.post('/bulk-upload', authenticateUser, async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 });
-
-// ═══════════════════════════════════════════════════════════════
-// LOGIN ACTIVITY ROUTES (Admin)
-// ═══════════════════════════════════════════════════════════════
-
-// GET: All Resources Login Activity (Admin)
-
 
 // ═══════════════════════════════════════════════════════════════
 // ASSIGNMENT MANAGEMENT ROUTES (Admin)
@@ -924,49 +948,6 @@ router.post('/:id/assignments/add', authenticateUser, async (req, res) => {
     });
   } catch (error) {
     console.error('Error adding assignment:', error);
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// DELETE: Remove assignment (soft delete) (Admin)
-router.delete('/:id/assignments/:subprojectId', authenticateUser, async (req, res) => {
-  try {
-    const resource = await Resource.findById(req.params.id);
-    if (!resource) {
-      return res.status(404).json({ message: 'Resource not found' });
-    }
-    
-    const adminEmail = req.user?.email || 'admin';
-    let found = false;
-    
-    for (const assignment of resource.assignments) {
-      const sp = assignment.subprojects.find(
-        s => s.subproject_id?.toString() === req.params.subprojectId
-      );
-      
-      if (sp) {
-        sp.status = 'removed';
-        sp.removed_date = new Date();
-        sp.removed_by = adminEmail;
-        found = true;
-        break;
-      }
-    }
-    
-    if (!found) {
-      return res.status(404).json({ message: 'Assignment not found' });
-    }
-    
-    resource.updated_by = adminEmail;
-    await resource.save();
-    
-    res.json({
-      success: true,
-      message: 'Assignment removed successfully',
-      resource
-    });
-  } catch (error) {
-    console.error('Error removing assignment:', error);
     res.status(500).json({ message: error.message });
   }
 });

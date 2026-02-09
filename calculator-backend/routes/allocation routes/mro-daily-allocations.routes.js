@@ -8,6 +8,7 @@ const MROAssignment = require('../../models/DailyAssignments/MROAssignment');
 const Resource = require('../../models/Resource');
 const Subproject = require('../../models/Subproject');
 const ActivityLog = require('../../models/ActivityLog');
+const { sendDeleteRequestNotification, getAdminEmails, sendDeleteRequestNotification_Development } = require('../../services/emailNotifier'); 
 
 // Middleware to verify resource token
 const verifyResourceToken = require('../../middleware/auth').authenticateResource;
@@ -190,34 +191,144 @@ router.get('/pending-assignments', verifyResourceToken, async (req, res) => {
   }
 });
 
+// Build date filter based on params
+const buildDateFilter = (query) => {
+  const { from_date, to_date, month, year } = query;
+
+  if (from_date) {
+    // Date range mode
+    const filter = { $gte: new Date(from_date) };
+    if (to_date) {
+      const end = new Date(to_date);
+      end.setHours(23, 59, 59, 999);
+      filter.$lte = end;
+    } else {
+      // Default to today
+      const today = new Date();
+      today.setHours(23, 59, 59, 999);
+      filter.$lte = today;
+    }
+    return filter;
+  }
+
+  // Month/year mode (existing logic)
+  const m = parseInt(month) || new Date().getMonth() + 1;
+  const y = parseInt(year) || new Date().getFullYear();
+  const startDate = new Date(y, m - 1, 1);
+  const endDate = new Date(y, m, 0, 23, 59, 59, 999);
+  return { $gte: startDate, $lte: endDate };
+};
+
+// GET: My stats/summary (for dashboard) - WITH PROCESS TYPE BREAKDOWN
+router.get('/my-stats', verifyResourceToken, async (req, res) => {
+  try {
+    const resourceEmail = req.resource.email.toLowerCase();
+    const dateFilter = buildDateFilter(req.query);
+
+    const matchStage = {
+      resource_email: resourceEmail,
+      allocation_date: dateFilter,
+      is_deleted: { $ne: true }
+    };
+
+    // Total count
+    const totalCases = await MRODailyAllocation.countDocuments(matchStage);
+
+    // By request type
+    const byRequestType = await MRODailyAllocation.aggregate([
+      { $match: matchStage },
+      { $group: { _id: '$request_type', count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]);
+
+    // By process type (Processing vs Logging)
+    const byProcessType = await MRODailyAllocation.aggregate([
+      { $match: matchStage },
+      { $group: { _id: '$process_type', count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]);
+
+    // Pending deletes
+    const pendingDeletes = await MRODailyAllocation.countDocuments({
+      ...matchStage,
+      has_pending_delete_request: true
+    });
+
+    res.json({
+      success: true,
+      client: 'MRO',
+      total_cases: totalCases,
+      total_entries: totalCases,
+      by_request_type: byRequestType,
+      by_process_type: byProcessType,
+      pending_delete_requests: pendingDeletes
+    });
+  } catch (err) {
+    console.error('MRO my-stats error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // GET: Previous logged cases (separate page)
 router.get('/previous-cases', verifyResourceToken, async (req, res) => {
   try {
-    const { month, year, subproject_key, process_type, request_id, geography_id, page = 1, limit = 50 } = req.query;
+    const { month, year, from_date, to_date, subproject_key, subproject_id, process_type, request_id, request_type, geography_id, page = 1, limit = 50 } = req.query;
     
-    const filters = {};
-    if (month) filters.month = parseInt(month);
-    if (year) filters.year = parseInt(year);
-    if (subproject_key) filters.subproject_key = subproject_key;
-    if (process_type) filters.process_type = process_type;
-    if (request_id) filters.request_id = request_id;
-    if (geography_id) filters.geography_id = geography_id;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
     
-    const allocations = await MRODailyAllocation.getPreviousLoggedCases(
-      req.resource.email,
-      filters
-    );
+    const query = {
+      resource_email: req.resource.email.toLowerCase(),
+      is_deleted: { $ne: true },
+      logged_date: { $lt: today }
+    };
     
-    // Paginate
+    // Date filtering - prioritize from_date/to_date over month/year
+    if (from_date || to_date) {
+      query.allocation_date = {};
+      if (from_date) {
+        const start = new Date(from_date);
+        start.setHours(0, 0, 0, 0);
+        query.allocation_date.$gte = start;
+      }
+      if (to_date) {
+        const end = new Date(to_date);
+        end.setHours(23, 59, 59, 999);
+        query.allocation_date.$lte = end;
+      }
+    } else if (month && year) {
+      query.month = parseInt(month);
+      query.year = parseInt(year);
+    }
+    
+    if (subproject_key) query.subproject_key = subproject_key;
+    if (subproject_id) query.subproject_id = subproject_id;
+    if (process_type) query.process_type = process_type;
+    if (request_id) query.request_id = { $regex: request_id, $options: 'i' };
+    if (request_type) query.request_type = request_type;
+    if (geography_id) query.geography_id = geography_id;
+    
+    const total = await MRODailyAllocation.countDocuments(query);
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    const paginatedAllocations = allocations.slice(skip, skip + parseInt(limit));
+    
+    const allocations = await MRODailyAllocation.find(query)
+      .sort({ allocation_date: -1, sr_no: -1 })
+      .skip(skip)
+      .limit(parseInt(limit))
+      .lean();
+    
+    // Add lock status
+    const allocationsWithLockStatus = allocations.map(a => ({
+      ...a,
+      is_locked: a.is_locked || (MRODailyAllocation.isDateLocked ? MRODailyAllocation.isDateLocked(a.allocation_date) : false)
+    }));
     
     res.json({
       success: true,
-      total: allocations.length,
+      total,
       page: parseInt(page),
-      pages: Math.ceil(allocations.length / parseInt(limit)),
-      allocations: paginatedAllocations
+      pages: Math.ceil(total / parseInt(limit)),
+      allocations: allocationsWithLockStatus
     });
     
   } catch (error) {
@@ -313,7 +424,7 @@ router.put('/:id', verifyResourceToken, async (req, res) => {
   }
 });
 
-// POST: Request deletion (resources cannot hard delete)
+// POST: Request deletion (resources cannot hard delete) - WITH EMAIL NOTIFICATION
 router.post('/:id/request-delete', verifyResourceToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -325,17 +436,39 @@ router.post('/:id/request-delete', verifyResourceToken, async (req, res) => {
       });
     }
     
-    const requesterInfo = {
-      id: req.resource._id,
-      email: req.resource.email,
-      name: req.resource.name
-    };
+    // Find the allocation first
+    const allocation = await MRODailyAllocation.findById(id);
+    if (!allocation) {
+      return res.status(404).json({ message: 'Allocation not found' });
+    }
     
-    const allocation = await MRODailyAllocation.requestDeletion(
-      id,
-      requesterInfo,
-      delete_reason
-    );
+    // Verify ownership
+    if (allocation.resource_id.toString() !== req.resource._id.toString()) {
+      return res.status(403).json({ message: 'You can only delete your own entries' });
+    }
+    
+    // Check if already has pending delete request
+    if (allocation.has_pending_delete_request) {
+      return res.status(400).json({ message: 'Delete request already pending for this entry' });
+    }
+    
+    // Check if locked
+    if (allocation.is_locked || (MRODailyAllocation.isDateLocked && MRODailyAllocation.isDateLocked(allocation.allocation_date))) {
+      return res.status(403).json({ message: 'This entry is locked and cannot be deleted' });
+    }
+    
+    // Set delete request fields directly
+    allocation.delete_request = {
+      requested_at: new Date(),
+      requested_by_id: req.resource._id,
+      requested_by_email: req.resource.email,
+      requested_by_name: req.resource.name,
+      delete_reason,
+      status: 'pending'
+    };
+    allocation.has_pending_delete_request = true;
+    
+    await allocation.save();
     
     // Log activity
     try {
@@ -346,6 +479,9 @@ router.post('/:id/request-delete', verifyResourceToken, async (req, res) => {
         actor_email: req.resource.email,
         actor_name: req.resource.name,
         allocation_id: allocation._id,
+        allocation_date: allocation.allocation_date,
+        client_name: 'MRO',
+        subproject_name: allocation.subproject_name,
         details: {
           action: 'delete_requested',
           delete_reason
@@ -355,6 +491,27 @@ router.post('/:id/request-delete', verifyResourceToken, async (req, res) => {
       console.log('Activity log error:', logErr.message);
     }
     
+    // Send email notification to admin(s)
+    try {
+      const adminEmails = await getAdminEmails();
+      console.log(adminEmails);
+      await sendDeleteRequestNotification({
+        adminEmails,
+        resourceName: req.resource.name,
+        resourceEmail: req.resource.email,
+        clientName: 'MRO',
+        allocationId: allocation._id,
+        allocationDate: allocation.allocation_date,
+        subprojectName: allocation.subproject_name,
+        requestId: allocation.request_id,
+        requestType: allocation.request_type,
+        deleteReason: delete_reason,
+        dashboardUrl: process.env.ADMIN_DASHBOARD_URL
+      });
+    } catch (emailErr) {
+      console.log('Email notification error (non-fatal):', emailErr.message);
+    }
+    
     res.json({
       success: true,
       message: 'Delete request submitted for admin approval',
@@ -362,6 +519,7 @@ router.post('/:id/request-delete', verifyResourceToken, async (req, res) => {
     });
     
   } catch (error) {
+    console.error('Delete request error:', error);
     res.status(400).json({ message: error.message });
   }
 });
@@ -493,7 +651,10 @@ router.get('/admin/all', verifyAdminToken, async (req, res) => {
 // GET: Pending delete requests (admin)
 router.get('/admin/delete-requests', verifyAdminToken, async (req, res) => {
   try {
-    const requests = await MRODailyAllocation.getPendingDeleteRequests();
+    const requests = await MRODailyAllocation.find({
+      has_pending_delete_request: true,
+      is_deleted: { $ne: true }
+    }).sort({ 'delete_request.requested_at': -1 }).lean();
     
     res.json({
       success: true,
@@ -516,28 +677,58 @@ router.post('/admin/review-delete/:id', verifyAdminToken, async (req, res) => {
       return res.status(400).json({ message: 'Action must be "approve" or "reject"' });
     }
     
-    const adminInfo = {
-      id: req.admin._id,
-      email: req.admin.email
-    };
+    const allocation = await MRODailyAllocation.findById(id);
+    if (!allocation) {
+      return res.status(404).json({ message: 'Allocation not found' });
+    }
+    if (!allocation.has_pending_delete_request) {
+      return res.status(400).json({ message: 'No pending delete request' });
+    }
     
-    const result = await MRODailyAllocation.reviewDeleteRequest(
-      id,
-      adminInfo,
-      action,
-      comment || '',
-      delete_type || 'soft'
-    );
+    const adminUser = req.admin || req.user;
+    
+    allocation.delete_request.reviewed_at = new Date();
+    allocation.delete_request.reviewed_by_id = adminUser._id;
+    allocation.delete_request.reviewed_by_email = adminUser.email;
+    allocation.delete_request.review_comment = comment || '';
+    
+    if (action === 'approve') {
+      allocation.delete_request.status = 'approved';
+      allocation.delete_request.delete_type = delete_type || 'soft';
+      
+      if (delete_type === 'hard') {
+        await allocation.deleteOne();
+        await ActivityLog.create({
+          activity_type: 'CASE_DELETED',
+          actor_type: 'admin',
+          actor_email: adminUser.email,
+          client_name: 'MRO',
+          allocation_id: id,
+          details: { action: 'delete_approved', delete_type: 'hard', comment }
+        });
+        return res.json({ success: true, message: 'Delete request approved - entry permanently deleted' });
+      } else {
+        allocation.is_deleted = true;
+        allocation.deleted_at = new Date();
+        allocation.deleted_by = adminUser.email;
+      }
+    } else {
+      allocation.delete_request.status = 'rejected';
+    }
+    
+    allocation.has_pending_delete_request = false;
+    await allocation.save();
     
     // Log activity
     await ActivityLog.create({
       activity_type: 'CASE_DELETED',
       actor_type: 'admin',
-      actor_email: req.admin.email,
-      allocation_id: id,
+      actor_email: adminUser.email,
+      client_name: 'MRO',
+      allocation_id: allocation._id,
       details: {
         action: `delete_${action}ed`,
-        delete_type,
+        delete_type: action === 'approve' ? (delete_type || 'soft') : null,
         comment
       }
     });
@@ -545,7 +736,7 @@ router.post('/admin/review-delete/:id', verifyAdminToken, async (req, res) => {
     res.json({
       success: true,
       message: `Delete request ${action}ed`,
-      result
+      result: allocation
     });
     
   } catch (error) {
@@ -565,10 +756,12 @@ router.put('/admin/:id', verifyAdminToken, async (req, res) => {
       });
     }
     
+    const adminUser = req.admin || req.user;
+    
     const editorInfo = {
-      id: req.admin._id,
-      email: req.admin.email,
-      name: req.admin.name || 'Admin',
+      id: adminUser._id,
+      email: adminUser.email,
+      name: adminUser.name || 'Admin',
       type: 'admin'
     };
     

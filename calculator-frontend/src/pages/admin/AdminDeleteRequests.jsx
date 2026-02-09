@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import axios from 'axios';
+import toast from 'react-hot-toast';
 
 const API_URL = import.meta.env.VITE_BACKEND_URL 
 
@@ -57,7 +58,7 @@ const AdminDeleteRequests = () => {
 
   const handleReview = async () => {
     if (!reviewAction) {
-      alert('Please select an action');
+      toast.error('Please select an action');
       return;
     }
     
@@ -70,6 +71,7 @@ const AdminDeleteRequests = () => {
           delete_type: deleteType
         },
         getAuthHeaders()
+        
       );
       
       setReviewingId(null);
@@ -78,10 +80,10 @@ const AdminDeleteRequests = () => {
       setDeleteType('soft');
       fetchRequests();
       
-      alert(`Delete request ${reviewAction}ed successfully`);
+      toast.success(`Delete request ${reviewAction}ed successfully`);
       
     } catch (err) {
-      alert(err.response?.data?.message || 'Failed to process request');
+      toast.error(err.response?.data?.message || 'Failed to process request');
     }
   };
 

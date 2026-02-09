@@ -2,7 +2,7 @@
 // Fixed: Uses date-filtered locations based on assigned_date
 import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
-
+import { toast } from 'react-hot-toast';
 const API_URL = import.meta.env.VITE_BACKEND_URL;
 
 // MRO Dropdown Options
@@ -168,18 +168,18 @@ const MROAllocationPanel = ({
 
   // Submit new entry
   const handleSubmit = async () => {
-    if (!formData.subproject_id || !formData.request_type) {
-      alert('Please select Location and Request Type');
+    if (!formData.subproject_id || !formData.request_type || !formData.request_id) {
+      toast.error('Please select Location and Request Type');
       return;
     }
     
     if (!dateValidation.valid) {
-      alert(dateValidation.message);
+      toast.error(dateValidation.message);
       return;
     }
     
     if (isProcessingType && !formData.requestor_type) {
-      alert('Please select Requestor Type for Processing locations');
+      toast.error('Please select Requestor Type for Processing locations');
       return;
     }
     
@@ -219,7 +219,7 @@ const MROAllocationPanel = ({
       if (onRefresh) onRefresh();
       
     } catch (err) {
-      alert(err.response?.data?.message || 'Failed to create entry');
+      toast.error(err.response?.data?.message || 'Failed to create entry');
     } finally {
       setSubmitting(false);
     }
@@ -246,7 +246,7 @@ const MROAllocationPanel = ({
 
   const saveEdit = async () => {
     if (!changeReason.trim()) {
-      alert('Please enter a change reason');
+      toast.error('Please enter a change reason');
       return;
     }
     
@@ -257,16 +257,17 @@ const MROAllocationPanel = ({
       }, getAuthHeaders());
       
       cancelEdit();
+      toast.success('Entry updated successfully');
       if (onRefresh) onRefresh();
     } catch (err) {
-      alert(err.response?.data?.message || 'Failed to update entry');
+      toast.error(err.response?.data?.message || 'Failed to update entry');
     }
   };
 
   // Delete request
   const submitDeleteRequest = async () => {
     if (!deleteReason.trim()) {
-      alert('Please enter a delete reason');
+      toast.error('Please enter a delete reason');
       return;
     }
     
@@ -278,9 +279,9 @@ const MROAllocationPanel = ({
       setShowDeleteModal(null);
       setDeleteReason('');
       if (onRefresh) onRefresh();
-      alert('Delete request submitted for admin approval');
+       toast.success('Delete request submitted for admin approval');
     } catch (err) {
-      alert(err.response?.data?.message || 'Failed to submit delete request');
+      toast.error(err.response?.data?.message || 'Failed to submit delete request');
     }
   };
 

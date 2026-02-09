@@ -1,4 +1,4 @@
-// routes/upload-resource.routes.js - Resource CSV Upload with UPSERT logic (preserves IDs)
+// routes/upload-resource.routes.js - Resource CSV Upload with UPSERT logic + Daily Assignments
 const express = require("express");
 const router = express.Router();
 const multer = require("multer");
@@ -12,6 +12,10 @@ const Client = require("../models/Client");
 const Project = require("../models/Project");
 const Subproject = require("../models/Subproject");
 const ActivityLog = require("../models/ActivityLog");
+
+// Daily Assignment Models
+const VerismaAssignment = require("../models/DailyAssignments/VerismaAssignment");
+const MROAssignment = require("../models/DailyAssignments/MROAssignment");
 
 const upload = multer({ dest: "uploads/" });
 
@@ -453,6 +457,353 @@ router.post("/bulk", upload.single("file"), async (req, res) => {
     } catch {}
     return res.status(500).json({ error: "Failed to process CSV: " + err.message });
   }
+});
+
+// =============================================
+// DAILY ASSIGNMENT UPLOAD - Creates pending assignments for resources
+// CSV Format: assignment_date, resource_email, location, client, process_type
+// =============================================
+router.post("/daily-assignments", upload.single("file"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+  const filePath = req.file.path;
+  const rows = [];
+
+  try {
+    console.log("⏱️ Daily Assignment Upload started...");
+
+    // 1. Read CSV
+    await new Promise((resolve, reject) => {
+      fs.createReadStream(filePath)
+        .pipe(
+          csv({
+            mapHeaders: ({ header }) => {
+              const h = header.toLowerCase().trim();
+              if (h === "date" || h === "assignment_date" || h === "assignment date") return "assignment_date";
+              if (h === "name" || h === "resource name" || h === "resource" || h === "assigner name") return "name";
+              if (h === "location" || h === "subproject" || h === "sub-project" || h === "sub project") return "location";
+              if (h === "process type" || h === "process_type" || h === "processtype" || h === "project" || h === "process") return "process_type";
+              if (h === "client" || h === "client name" || h === "client_name") return "client";
+              if (h === "geography" || h === "geo" || h === "region") return "geography";
+              if (h === "email" || h === "email id" || h === "email_id" || h === "emailid") return "email";
+              return header;
+            },
+          })
+        )
+        .on("data", (row) => {
+          if (Object.values(row).every((v) => !v)) return;
+          rows.push(row);
+        })
+        .on("end", resolve)
+        .on("error", reject);
+    });
+
+    console.log(`📄 Read ${rows.length} rows from CSV`);
+
+    // 2. Validate and process rows
+    const errors = [];
+    const stats = {
+      total_rows: rows.length,
+      created: 0,
+      skipped: 0,
+      errors: 0
+    };
+
+    const batchId = `daily_assign_${Date.now()}`;
+    const adminEmail = req.user?.email || req.admin?.email || 'system';
+
+    for (let idx = 0; idx < rows.length; idx++) {
+      const r = rows[idx];
+      const rowNum = idx + 2;
+
+      try {
+        const assignmentDate = norm(r.assignment_date);
+        const name = norm(r.name);
+        const location = norm(r.location);
+        const processType = norm(r.process_type);
+        const clientName = norm(r.client);
+        const geographyName = norm(r.geography) || "US";
+        const email = norm(r.email)?.toLowerCase();
+
+        // Validate required fields
+        if (!assignmentDate || !email || !location || !clientName) {
+          errors.push({
+            row: rowNum,
+            email,
+            location,
+            client: clientName,
+            error: "Missing required fields (date, email, location, client)"
+          });
+          stats.errors++;
+          continue;
+        }
+
+        // Parse date
+        const parsedDate = new Date(assignmentDate);
+        if (isNaN(parsedDate.getTime())) {
+          errors.push({ row: rowNum, email, location, error: `Invalid date: ${assignmentDate}` });
+          stats.errors++;
+          continue;
+        }
+        parsedDate.setHours(0, 0, 0, 0);
+
+        // Find resource
+        const resource = await Resource.findOne({
+          $or: [
+            { email_normalized: email },
+            { email: { $regex: new RegExp(`^${email}$`, "i") } }
+          ]
+        });
+
+        if (!resource) {
+          errors.push({ row: rowNum, email, location, error: `Resource not found: ${email}` });
+          stats.errors++;
+          continue;
+        }
+
+        // Find Geography
+        const geography = await Geography.findOne({
+          name: { $regex: new RegExp(`^${geographyName}$`, "i") },
+        }).lean();
+
+        if (!geography) {
+          errors.push({ row: rowNum, email, location, error: `Geography not found: ${geographyName}` });
+          stats.errors++;
+          continue;
+        }
+
+        // Find Client
+        const client = await Client.findOne({
+          geography_id: geography._id,
+          name: { $regex: new RegExp(`^${clientName}$`, "i") },
+        }).lean();
+
+        if (!client) {
+          errors.push({ row: rowNum, email, location, error: `Client not found: ${clientName}` });
+          stats.errors++;
+          continue;
+        }
+
+        // Find Project (if provided)
+        let project = null;
+        if (processType) {
+          project = await Project.findOne({
+            client_id: client._id,
+            name: { $regex: new RegExp(`^${processType}$`, "i") },
+          }).lean();
+
+          if (!project) {
+            // Try partial match
+            const lastWord = processType.toLowerCase().split(/\s+/).pop();
+            project = await Project.findOne({
+              client_id: client._id,
+              name: { $regex: new RegExp(lastWord, "i") },
+            }).lean();
+          }
+        }
+
+        // Find Subproject
+        const subprojectKey = generateSubprojectKey(client.name, project?.name || '', location);
+        
+        let subproject = await Subproject.findOne({
+          business_key: subprojectKey
+        }).lean();
+
+        if (!subproject && project) {
+          subproject = await Subproject.findOne({
+            project_id: project._id,
+            name: { $regex: new RegExp(`^${location}$`, "i") },
+          }).lean();
+        }
+
+        if (!subproject) {
+          // Try to find by name only under the client
+          subproject = await Subproject.findOne({
+            client_name: { $regex: new RegExp(`^${clientName}$`, "i") },
+            name: { $regex: new RegExp(`^${location}$`, "i") },
+          }).lean();
+        }
+
+        if (!subproject) {
+          errors.push({ row: rowNum, email, location, error: `Location not found: ${location}` });
+          stats.errors++;
+          continue;
+        }
+
+        // Check if resource has access to this location
+        let hasAccess = false;
+        let assignmentInfo = null;
+
+        for (const assignment of resource.assignments || []) {
+          if (assignment.client_name?.toLowerCase() !== clientName.toLowerCase()) continue;
+          
+          for (const sp of assignment.subprojects || []) {
+            if (sp.subproject_id?.toString() === subproject._id.toString() && 
+                (!sp.status || sp.status === 'active')) {
+              hasAccess = true;
+              assignmentInfo = {
+                geography_id: assignment.geography_id,
+                geography_name: assignment.geography_name,
+                geography_type: assignment.geography_type,
+                client_id: assignment.client_id,
+                client_name: assignment.client_name,
+                project_id: assignment.project_id,
+                project_name: assignment.project_name,
+                subproject_id: sp.subproject_id,
+                subproject_name: sp.subproject_name,
+                subproject_key: sp.subproject_key || subprojectKey
+              };
+              break;
+            }
+          }
+          if (hasAccess) break;
+        }
+
+        if (!hasAccess) {
+          errors.push({ row: rowNum, email, location, error: `Resource ${email} not assigned to location: ${location}` });
+          stats.errors++;
+          continue;
+        }
+
+        // Create daily assignment based on client type
+        const clientLower = clientName.toLowerCase();
+        
+        if (clientLower === 'verisma') {
+          // Check if already exists
+          const existing = await VerismaAssignment.findOne({
+            resource_email: email,
+            assignment_date: parsedDate,
+            subproject_id: subproject._id
+          });
+
+          if (existing) {
+            stats.skipped++;
+            continue;
+          }
+
+          await VerismaAssignment.create({
+            assignment_date: parsedDate,
+            resource_id: resource._id,
+            resource_name: resource.name,
+            resource_email: email,
+            geography_id: assignmentInfo.geography_id,
+            geography_name: assignmentInfo.geography_name,
+            geography_type: assignmentInfo.geography_type,
+            client_id: assignmentInfo.client_id,
+            client_name: 'Verisma',
+            project_id: assignmentInfo.project_id,
+            project_name: assignmentInfo.project_name,
+            subproject_id: assignmentInfo.subproject_id,
+            subproject_name: assignmentInfo.subproject_name,
+            subproject_key: assignmentInfo.subproject_key,
+            status: 'pending',
+            source: 'csv_upload',
+            upload_batch_id: batchId,
+            uploaded_by: adminEmail,
+            uploaded_at: new Date()
+          });
+
+          stats.created++;
+          console.log(`[ASSIGNMENT] Created Verisma: ${email} → ${location} for ${assignmentDate}`);
+
+        } else if (clientLower === 'mro') {
+          // Check if already exists
+          const existing = await MROAssignment.findOne({
+            resource_email: email,
+            assignment_date: parsedDate,
+            subproject_id: subproject._id
+          });
+
+          if (existing) {
+            stats.skipped++;
+            continue;
+          }
+
+          await MROAssignment.create({
+            assignment_date: parsedDate,
+            resource_id: resource._id,
+            resource_name: resource.name,
+            resource_email: email,
+            geography_id: assignmentInfo.geography_id,
+            geography_name: assignmentInfo.geography_name,
+            client_id: assignmentInfo.client_id,
+            client_name: 'MRO',
+            project_id: assignmentInfo.project_id,
+            project_name: assignmentInfo.project_name,
+            subproject_id: assignmentInfo.subproject_id,
+            subproject_name: assignmentInfo.subproject_name,
+            subproject_key: assignmentInfo.subproject_key,
+            status: 'pending',
+            is_visible: true,
+            source: 'csv_upload',
+            upload_batch_id: batchId,
+            uploaded_by: adminEmail,
+            uploaded_at: new Date()
+          });
+
+          stats.created++;
+          console.log(`[ASSIGNMENT] Created MRO: ${email} → ${location} for ${assignmentDate}`);
+
+        } else {
+          errors.push({ row: rowNum, email, location, error: `Unsupported client for daily assignments: ${clientName}` });
+          stats.errors++;
+        }
+
+      } catch (err) {
+        if (err.code === 11000) {
+          stats.skipped++;
+        } else {
+          errors.push({ row: rowNum, error: err.message });
+          stats.errors++;
+        }
+      }
+    }
+
+    // Cleanup
+    fs.unlinkSync(filePath);
+
+    // Return results
+    if (errors.length > 0) {
+      const fields = ["row", "email", "location", "client", "error"];
+      const parser = new Parser({ fields });
+      const csvOut = parser.parse(errors);
+
+      res.setHeader("Content-Disposition", "attachment; filename=daily-assignment-errors.csv");
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("X-Has-Errors", "true");
+      res.setHeader("X-Stats", JSON.stringify(stats));
+      return res.status(207).send(csvOut);
+    }
+
+    console.log(`\n🎉 Daily Assignment Upload completed!`);
+    console.log(`   Created: ${stats.created}, Skipped: ${stats.skipped}, Errors: ${stats.errors}`);
+
+    return res.json({
+      status: "success",
+      message: `Created ${stats.created} daily assignments, skipped ${stats.skipped} duplicates`,
+      stats
+    });
+
+  } catch (err) {
+    console.error("Daily Assignment upload error:", err);
+    try { fs.unlinkSync(filePath); } catch {}
+    return res.status(500).json({ error: "Failed to process CSV: " + err.message });
+  }
+});
+
+// =============================================
+// GET DAILY ASSIGNMENT TEMPLATE
+// =============================================
+router.get("/daily-assignments/template", (req, res) => {
+  const template = `Assignment Date,Email,Location,Client,Process Type,Geography
+2026-02-06,john@example.com,Location A,Verisma,Data Processing,US
+2026-02-06,john@example.com,Location B,Verisma,Data Processing,US
+2026-02-06,jane@example.com,Location A,Verisma,Data Processing,US
+2026-02-07,john@example.com,Location A,Verisma,Data Processing,US`;
+  
+  res.setHeader("Content-Type", "text/csv");
+  res.setHeader("Content-Disposition", "attachment; filename=Daily_Assignment_Template.csv");
+  res.send(template);
 });
 
 // =============================================
