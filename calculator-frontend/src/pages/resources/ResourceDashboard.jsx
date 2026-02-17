@@ -1,5 +1,8 @@
 // src/pages/ResourceDashboard.jsx
-// Multi-client dashboard with DATE-FILTERED location fetching
+// Multi-client dashboard with smart location filtering
+// - Dropdown: Shows ALL assigned locations (allows multiple entries per location per day)
+// - Pending: Locations not yet logged for the selected date
+// - Future dates: If location was logged on a previous date, it won't appear for future dates
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
@@ -42,9 +45,9 @@ const ResourceDashboard = () => {
   const [selectedClient, setSelectedClient] = useState('');
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
   
-  // Data state - locations are now DATE-FILTERED from API
-  const [locations, setLocations] = useState([]);
-  const [allocations, setAllocations] = useState([]);
+  // Data state
+  const [locations, setLocations] = useState([]);  // Locations for dropdown (date-filtered but allows multiple)
+  const [allocations, setAllocations] = useState([]);  // Allocations for selected date
   const [loadingLocations, setLoadingLocations] = useState(false);
   const [loadingAllocations, setLoadingAllocations] = useState(false);
   
@@ -72,7 +75,7 @@ const ResourceDashboard = () => {
     headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
   });
 
-  // Fetch resource info with all assignments (for geo/client selection)
+  // Fetch resource info with all assignments
   const fetchResourceInfo = async () => {
     try {
       setLoading(true);
@@ -93,8 +96,10 @@ const ResourceDashboard = () => {
     }
   };
 
-  // CRITICAL: Fetch locations filtered by date
-  // Only returns locations assigned ON or BEFORE the selected date
+  // Fetch locations for dropdown
+  // Uses /locations endpoint which filters by:
+  // 1. assigned_date <= selectedDate
+  // 2. NOT logged on any date BEFORE selectedDate (for future date filtering)
   const fetchLocationsForDate = async (clientName, date) => {
     if (!clientName || !date) return;
     
@@ -104,7 +109,7 @@ const ResourceDashboard = () => {
         ...getAuthHeaders(),
         params: { 
           client: clientName,
-          date: date  // API will filter based on assigned_date
+          date: date
         }
       });
       
@@ -146,7 +151,7 @@ const ResourceDashboard = () => {
     }
   };
 
-  // Extract unique geographies from all assignments
+  // Extract unique geographies
   const geographies = useMemo(() => {
     const geoMap = new Map();
     allAssignments.forEach(a => {
@@ -157,7 +162,7 @@ const ResourceDashboard = () => {
     return Array.from(geoMap.values());
   }, [allAssignments]);
 
-  // Extract clients available for selected geography
+  // Extract clients for selected geography
   const availableClients = useMemo(() => {
     if (!selectedGeography) return [];
     
@@ -172,7 +177,7 @@ const ResourceDashboard = () => {
     return Array.from(clientMap.values());
   }, [allAssignments, selectedGeography]);
 
-  // Get location count per client (total assigned, not date-filtered)
+  // Get location count per client
   const getClientLocationCount = (clientName) => {
     if (!selectedGeography) return 0;
     return allAssignments
@@ -191,7 +196,7 @@ const ResourceDashboard = () => {
     return availableClients.find(c => c.id === selectedClient)?.name || '';
   }, [selectedClient, availableClients]);
 
-  // Fetch locations and allocations when client or date changes
+  // Fetch data when client or date changes
   useEffect(() => {
     if (selectedClient && selectedDate && currentClientName) {
       fetchLocationsForDate(currentClientName, selectedDate);
@@ -212,7 +217,6 @@ const ResourceDashboard = () => {
 
   const handleDateChange = (date) => {
     setSelectedDate(date);
-    // Locations will be re-fetched via useEffect
   };
 
   const handleRefresh = () => {
@@ -253,7 +257,7 @@ const ResourceDashboard = () => {
     const geographyName = geographies.find(g => g.id === selectedGeography)?.name || '';
     
     const commonProps = {
-      locations: locations, // DATE-FILTERED locations
+      locations: locations,  // Date-filtered locations
       selectedDate,
       resourceInfo,
       geographyId: selectedGeography,
@@ -418,7 +422,7 @@ const ResourceDashboard = () => {
                 {locations.reduce((sum, l) => sum + (l.subprojects?.length || 0), 0)} location(s) available for {selectedDate}
                 {locations.length === 0 && (
                   <span className="text-yellow-600 ml-2">
-                    (Locations may not be assigned for this date yet)
+                    (All locations may have been logged on previous dates)
                   </span>
                 )}
               </div>

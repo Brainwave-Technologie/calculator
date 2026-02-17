@@ -712,16 +712,53 @@ export default function ResourcesPage() {
     fetchProjects();
   }, [filters.client]);
 
-  const fetchResources = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const queryParams = { page: currentPage, limit: itemsPerPage, search: debouncedSearch || undefined };
-      const res = await apiService.getResources(queryParams);
-      if (res.data?.resources) { setResources(res.data.resources); setTotalPages(res.data.pagination?.pages || Math.ceil(res.data.pagination?.total / itemsPerPage) || 1); setTotalItems(res.data.pagination?.total || res.data.resources.length); }
-      else { setResources([]); setTotalPages(1); setTotalItems(0); }
-    } catch (error) { console.error("Failed to fetch resources:", error); toast.error("Failed to load resources"); }
-    finally { setIsLoading(false); }
-  }, [currentPage, itemsPerPage, debouncedSearch]);
+ 
+const fetchResources = useCallback(async () => {
+  setIsLoading(true);
+  try {
+    // ✅ FIXED: Include all filter parameters
+    const queryParams = { 
+      page: currentPage, 
+      limit: itemsPerPage, 
+      search: debouncedSearch || undefined,
+      geography: filters.geography || undefined,    // ← ADDED
+      client: filters.client || undefined,          // ← ADDED
+      project: filters.project || undefined         // ← ADDED
+    };
+    
+    const res = await apiService.getResources(queryParams);
+    
+    if (res.data?.resources && res.data?.pagination) {
+      const { resources, pagination } = res.data;
+      
+      const validTotal = Math.max(0, parseInt(pagination.total) || 0);
+      const validPages = Math.max(1, parseInt(pagination.pages) || 1);
+      const validPage = Math.max(1, parseInt(pagination.page) || 1);
+      
+      setResources(resources || []);
+      setTotalItems(validTotal);
+      setTotalPages(validPages);
+      
+      if (validPage > validPages && validTotal > 0) {
+        setCurrentPage(1);
+      }
+    } else {
+      console.warn('Unexpected pagination response:', res.data);
+      setResources(res.data?.resources || []);
+      setTotalItems(0);
+      setTotalPages(1);
+    }
+  } catch (error) {
+    console.error('Failed to fetch resources:', error);
+    toast.error('Failed to load resources');
+    setResources([]);
+    setTotalItems(0);
+    setTotalPages(1);
+  } finally {
+    setIsLoading(false);
+  }
+  // ✅ FIXED: Added filter dependencies
+}, [currentPage, itemsPerPage, debouncedSearch, filters.geography, filters.client, filters.project]);
 
   useEffect(() => { fetchResources(); }, [fetchResources]);
 
@@ -779,8 +816,22 @@ JKL,Christus Health,Complete logging,MRO,US,JKL@valerionhealth.us`;
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = "resource-upload-template.csv"; a.click(); URL.revokeObjectURL(url);
   }, []);
 
-  const handlePageChange = useCallback((newPage) => { if (newPage > 0 && newPage <= totalPages) setCurrentPage(newPage); }, [totalPages]);
-  const handleItemsPerPageChange = useCallback((e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }, []);
+ 
+const handlePageChange = useCallback((newPage) => {
+  if (newPage >= 1 && newPage <= totalPages) {
+    setCurrentPage(newPage);
+  } else if (newPage < 1) {
+    setCurrentPage(1);
+  } else if (newPage > totalPages) {
+    setCurrentPage(totalPages);
+  }
+}, [totalPages]);
+
+const handleItemsPerPageChange = useCallback((e) => {
+  const newLimit = Math.max(1, Math.min(100, parseInt(e.target.value) || 10));
+  setItemsPerPage(newLimit);
+  setCurrentPage(1); // Reset to first page when changing items per page
+}, []);
   const clearFilters = useCallback(() => { setFilters({ geography: "", client: "", project: "", search: "" }); setCurrentPage(1); }, []);
 
   return (
@@ -880,19 +931,70 @@ JKL,Christus Health,Complete logging,MRO,US,JKL@valerionhealth.us`;
             </table>
           </div>
           <ConfirmDeleteProjectModal isOpen={confirmDeleteResource} onClose={() => setConfirmDeleteResource(false)} projectName={getResourceName(resourceId)} onConfirm={() => handleDeleteResource(resourceId)} />
-          <div className="bg-gray-50 border-t border-gray-200 px-6 py-3">
-            <div className="flex items-center justify-between">
-              <div className="text-sm text-gray-700">Showing <span className="font-medium">{totalItems === 0 ? 0 : (currentPage - 1) * itemsPerPage + 1}</span> to <span className="font-medium">{Math.min(currentPage * itemsPerPage, totalItems)}</span> of <span className="font-medium">{totalItems}</span></div>
-              <div className="flex items-center space-x-2">
-                <select value={itemsPerPage} onChange={handleItemsPerPageChange} className="border border-gray-300 rounded-md text-sm px-2 py-1 bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"><option value={10}>10 / page</option><option value={20}>20 / page</option><option value={50}>50 / page</option></select>
-                <div className="flex rounded-md shadow-sm">
-                  <button onClick={() => handlePageChange(currentPage - 1)} disabled={currentPage === 1} className={`inline-flex items-center px-2 py-1.5 rounded-l-md border border-gray-300 bg-white text-sm ${currentPage === 1 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-500 hover:bg-gray-50'}`}><ChevronLeftIcon className="h-4 w-4" /></button>
-                  <span className="inline-flex items-center px-4 py-1.5 border-t border-b border-gray-300 bg-white text-sm text-gray-700">{currentPage} / {totalPages}</span>
-                  <button onClick={() => handlePageChange(currentPage + 1)} disabled={currentPage === totalPages || totalPages === 0} className={`inline-flex items-center px-2 py-1.5 rounded-r-md border border-gray-300 bg-white text-sm ${currentPage === totalPages || totalPages === 0 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-500 hover:bg-gray-50'}`}><ChevronRightIcon className="h-4 w-4" /></button>
-                </div>
-              </div>
-            </div>
-          </div>
+          
+<div className="px-6 py-4 border-t border-gray-200 bg-gray-50">
+  <div className="flex items-center justify-between">
+    <div className="text-sm text-gray-700">
+      Showing{' '}
+      <span className="font-medium">
+        {totalItems === 0 ? 0 : (currentPage - 1) * itemsPerPage + 1}
+      </span>{' '}
+      to{' '}
+      <span className="font-medium">
+        {Math.min(currentPage * itemsPerPage, totalItems)}
+      </span>{' '}
+      of{' '}
+      <span className="font-medium">{totalItems}</span>
+    </div>
+    
+    <div className="flex items-center space-x-2">
+      <select 
+        value={itemsPerPage} 
+        onChange={handleItemsPerPageChange} 
+        className="border border-gray-300 rounded-md text-sm px-2 py-1 bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+      >
+        <option value={10}>10 / page</option>
+        <option value={20}>20 / page</option>
+        <option value={50}>50 / page</option>
+      </select>
+      
+      <div className="flex rounded-md shadow-sm">
+        {/* Previous Button */}
+        <button 
+          onClick={() => handlePageChange(currentPage - 1)} 
+          disabled={currentPage === 1 || totalPages === 0 || isLoading}
+          className={`inline-flex items-center px-2 py-1.5 rounded-l-md border border-gray-300 bg-white text-sm transition ${
+            currentPage === 1 || totalPages === 0 || isLoading
+              ? 'text-gray-300 cursor-not-allowed' 
+              : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
+          }`}
+          title={currentPage === 1 ? 'Already on first page' : 'Go to previous page'}
+        >
+          <ChevronLeftIcon className="h-4 w-4" />
+        </button>
+        
+        {/* Page Info */}
+        <span className="inline-flex items-center px-4 py-1.5 border-t border-b border-gray-300 bg-white text-sm text-gray-700 font-medium">
+          {totalPages === 0 ? '0 / 0' : `${currentPage} / ${totalPages}`}
+        </span>
+        
+        {/* Next Button - FIXED LOGIC */}
+        <button 
+          onClick={() => handlePageChange(currentPage + 1)}
+          disabled={currentPage >= totalPages || totalPages === 0 || isLoading}
+          className={`inline-flex items-center px-2 py-1.5 rounded-r-md border border-gray-300 bg-white text-sm transition ${
+            currentPage >= totalPages || totalPages === 0 || isLoading
+              ? 'text-gray-300 cursor-not-allowed' 
+              : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
+          }`}
+          title={currentPage >= totalPages ? 'Already on last page' : 'Go to next page'}
+        >
+          <ChevronRightIcon className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
         </div>
       </div>
     </>

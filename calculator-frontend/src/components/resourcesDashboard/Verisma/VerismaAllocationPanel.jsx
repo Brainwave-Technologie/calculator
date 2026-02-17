@@ -1,29 +1,35 @@
-// src/components/resource/VerismaAllocationPanel.jsx
-// Verisma allocation panel - Resources log entries from PENDING ASSIGNMENTS ONLY
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+// src/components/resourcesDashboard/Verisma/VerismaAllocationPanel.jsx
+// UPDATED: 
+// - Allows multiple entries per location per day (same Request ID logic)
+// - "Pending" = locations not yet logged for this selected date
+// - Location dropdown shows ALL assigned locations (with entry count indicator)
+// - Once logged on ANY date, location won't appear as "pending" on future dates
+import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { toast } from 'react-hot-toast';
 const API_URL = import.meta.env.VITE_BACKEND_URL;
 
-// Dropdown Options
+// Verisma Dropdown Options
 const VERISMA_REQUEST_TYPES = ['New Request', 'Duplicate', 'Key'];
-const VERISMA_REQUESTOR_TYPES = ['Disability', 'Government', 'In Payment', 'Insurance', 'Legal', 'Other billable', 'Other', 'Non-Billable', 'Patient', 'Post payment', 'Provider', 'Service'];
+const VERISMA_REQUESTOR_TYPES = [
+  'Disability', 'Government', 'In Payment', 'Insurance', 'Legal', 
+  'Other billable', 'Other', 'Non-Billable', 'Patient', 'Post payment', 
+  'Provider', 'Service'
+];
 
-const VerismaAllocationPanel = ({ resourceInfo, onNavigateToPrevious }) => {
-  const [loading, setLoading] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
-  
-  // Pending assignments
-  const [pendingAssignments, setPendingAssignments] = useState([]);
-  const [hasPreviousPending, setHasPreviousPending] = useState(false);
-  const [blockedMessage, setBlockedMessage] = useState(null);
-  
-  // Today's logged entries
-  const [todaysEntries, setTodaysEntries] = useState([]);
-  
-  // Selected assignment for entry
-  const [selectedAssignment, setSelectedAssignment] = useState(null);
+const VerismaAllocationPanel = ({ 
+  locations = [],  // DATE-FILTERED locations from parent
+  selectedDate, 
+  resourceInfo, 
+  geographyId,
+  geographyName,
+  allocations = [],  // Allocations for selectedDate
+  onRefresh,
+  loading 
+}) => {
+  // Form state
   const [formData, setFormData] = useState({
+    subproject_id: '',
     facility: '',
     request_id: '',
     request_type: '',
@@ -33,533 +39,756 @@ const VerismaAllocationPanel = ({ resourceInfo, onNavigateToPrevious }) => {
     remark: ''
   });
   
-  // Request ID check
+  // UI state
+  const [submitting, setSubmitting] = useState(false);
   const [requestIdWarning, setRequestIdWarning] = useState(null);
-  const [checkingRequestId, setCheckingRequestId] = useState(false);
+  const [selectedLocationInfo, setSelectedLocationInfo] = useState(null);
+  
+  // Edit state
+  const [editingId, setEditingId] = useState(null);
+  const [editData, setEditData] = useState({});
+  const [changeReason, setChangeReason] = useState('');
+  
+  // Delete state
+  const [showDeleteModal, setShowDeleteModal] = useState(null);
+  const [deleteReason, setDeleteReason] = useState('');
 
-  const getAuthHeaders = () => ({ 
-    headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } 
+  const getAuthHeaders = () => ({
+    headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
   });
 
-  // ═══════════════════════════════════════════════════════════
-  // FETCH DATA
-  // ═══════════════════════════════════════════════════════════
+  // Flatten locations from assignments
+  const allAssignedLocations = useMemo(() => {
+    const locs = [];
+    
+    locations.forEach(assignment => {
+      assignment.subprojects?.forEach(sp => {
+        locs.push({
+          subproject_id: sp.subproject_id,
+          subproject_name: sp.subproject_name,
+          subproject_key: sp.subproject_key,
+          assigned_date: sp.assigned_date,
+          project_id: assignment.project_id,
+          project_name: assignment.project_name,
+          client_id: assignment.client_id,
+          client_name: assignment.client_name,
+          geography_id: assignment.geography_id,
+          geography_name: assignment.geography_name
+        });
+      });
+    });
+    
+    return locs;
+  }, [locations]);
 
-  const fetchPendingAssignments = useCallback(async () => {
-    try {
-      const response = await axios.get(
-        `${API_URL}/verisma-daily-allocations/pending-assignments`,
-        getAuthHeaders()
-      );
-      
-      setPendingAssignments(response.data.assignments || []);
-      setHasPreviousPending(response.data.has_previous_pending || false);
-      setBlockedMessage(response.data.blocked_message || null);
-      
-    } catch (error) {
-      console.error('Error fetching pending:', error);
-      setPendingAssignments([]);
-    }
-  }, []);
+  // ═══════════════════════════════════════════════════════════════
+  // AVAILABLE LOCATIONS: ALL assigned locations (for multiple entries)
+  // Show all locations in dropdown - user can add multiple Request IDs
+  // ═══════════════════════════════════════════════════════════════
+  const availableLocations = useMemo(() => {
+    return allAssignedLocations;
+  }, [allAssignedLocations]);
 
-  const fetchTodaysEntries = useCallback(async () => {
-    try {
-      const today = new Date().toISOString().split('T')[0];
-      const response = await axios.get(
-        `${API_URL}/verisma-daily-allocations/my-allocations?date=${today}`,
-        getAuthHeaders()
-      );
-      setTodaysEntries(response.data.allocations || []);
-    } catch (error) {
-      console.error('Error fetching today entries:', error);
-      setTodaysEntries([]);
-    }
-  }, []);
+  // ═══════════════════════════════════════════════════════════════
+  // PENDING LOCATIONS: Locations that have NO entries for selected date
+  // These are "pending" because they need at least one entry
+  // ═══════════════════════════════════════════════════════════════
+  const pendingLocations = useMemo(() => {
+    const loggedSubprojectIds = new Set(
+      allocations.map(a => a.subproject_id?.toString())
+    );
+    
+    return allAssignedLocations.filter(loc => 
+      !loggedSubprojectIds.has(loc.subproject_id?.toString())
+    );
+  }, [allAssignedLocations, allocations]);
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    await Promise.all([fetchPendingAssignments(), fetchTodaysEntries()]);
-    setLoading(false);
-  }, [fetchPendingAssignments, fetchTodaysEntries]);
-
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
-
-  // ═══════════════════════════════════════════════════════════
-  // REQUEST ID CHECK
-  // ═══════════════════════════════════════════════════════════
-
-  useEffect(() => {
-    const timer = setTimeout(async () => {
-      if (!formData.request_id || formData.request_id.trim() === '') {
-        setRequestIdWarning(null);
-        return;
+  // Get entry count per location for display in dropdown
+  const entriesPerLocation = useMemo(() => {
+    const counts = {};
+    allocations.forEach(a => {
+      const key = a.subproject_id?.toString();
+      if (key) {
+        counts[key] = (counts[key] || 0) + 1;
       }
+    });
+    return counts;
+  }, [allocations]);
+
+  // Check if selected date is valid
+  const dateValidation = useMemo(() => {
+    if (!selectedDate) return { valid: false, message: 'No date selected' };
+    
+    const selected = new Date(selectedDate);
+    selected.setHours(0, 0, 0, 0);
+    
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    if (selected > today) {
+      return { valid: false, message: 'Cannot log entries for future dates' };
+    }
+    
+    const lastDayOfMonth = new Date(selected.getFullYear(), selected.getMonth() + 1, 0);
+    lastDayOfMonth.setHours(23, 59, 59, 999);
+    
+    if (new Date() > lastDayOfMonth) {
+      return { valid: false, message: 'This month is locked. Cannot add new entries.' };
+    }
+    
+    return { valid: true, message: null };
+  }, [selectedDate]);
+
+  // Handle location selection - now searches in ALL locations
+  const handleLocationChange = (subprojectId) => {
+    const location = allAssignedLocations.find(l => l.subproject_id === subprojectId);
+    setSelectedLocationInfo(location);
+    
+    setFormData(prev => ({
+      ...prev,
+      subproject_id: subprojectId
+    }));
+  };
+
+  // Check Request ID for duplicates
+  const checkRequestId = async (requestId) => {
+    if (!requestId || requestId.trim() === '') {
+      setRequestIdWarning(null);
+      return;
+    }
+    
+    try {
+      const response = await axios.get(`${API_URL}/verisma-daily-allocations/check-request-id`, {
+        ...getAuthHeaders(),
+        params: { request_id: requestId }
+      });
       
-      setCheckingRequestId(true);
-      try {
-        const response = await axios.get(
-          `${API_URL}/verisma-daily-allocations/check-request-id?request_id=${encodeURIComponent(formData.request_id)}`,
-          getAuthHeaders()
-        );
-        
-        if (response.data.exists && response.data.has_new_request) {
-          setRequestIdWarning({
-            type: 'error',
-            message: `This Request ID already has a "New Request". Use "${response.data.suggested_type}" instead.`,
-            suggestedType: response.data.suggested_type
-          });
-          
-          if (formData.request_type === 'New Request') {
-            setFormData(prev => ({ ...prev, request_type: response.data.suggested_type }));
-          }
-        } else {
-          setRequestIdWarning(null);
+      if (response.data.exists && response.data.has_new_request) {
+        setRequestIdWarning({
+          message: `This Request ID already has a "New Request" entry`,
+          suggested_type: response.data.suggested_type
+        });
+        // Auto-select suggested type
+        if (formData.request_type === 'New Request' || formData.request_type === '') {
+          setFormData(prev => ({ ...prev, request_type: response.data.suggested_type }));
         }
-      } catch (error) {
-        console.error('Error checking request ID:', error);
-      } finally {
-        setCheckingRequestId(false);
+      } else {
+        setRequestIdWarning(null);
+      }
+    } catch (err) {
+      console.error('Error checking request ID:', err);
+    }
+  };
+
+  // Debounced request ID check
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (formData.request_id) {
+        checkRequestId(formData.request_id);
+      } else {
+        setRequestIdWarning(null);
       }
     }, 500);
     
     return () => clearTimeout(timer);
-  }, [formData.request_id, formData.request_type]);
+  }, [formData.request_id]);
 
-  // ═══════════════════════════════════════════════════════════
-  // FORM HANDLERS
-  // ═══════════════════════════════════════════════════════════
-
-  const handleSelectAssignment = (assignment) => {
-    setSelectedAssignment(assignment);
-    setFormData({
-      facility: '',
-      request_id: '',
-      request_type: '',
-      requestor_type: '',
-      bronx_care_processing_time: '',
-      count: 1,
-      remark: ''
-    });
-    setRequestIdWarning(null);
-  };
-
-  const handleFormChange = (field, value) => {
-    setFormData(prev => ({ ...prev, [field]: value }));
-  };
-
+  // Submit new entry
   const handleSubmit = async () => {
-    if (!selectedAssignment) {
-      toast.error('Please select an assignment from the pending list');
+    if (!formData.subproject_id) {
+      toast.error('Please select a Location');
+      return;
+    }
+    
+    if (!formData.request_id) {
+      toast.error('Please enter Request ID');
       return;
     }
     
     if (!formData.request_type) {
-      toast.error('Please select a request type');
+      toast.error('Please select Request Type');
       return;
     }
     
-    if (formData.request_type === 'New Request' && requestIdWarning?.type === 'error') {
-      toast.error('Cannot use "New Request" - this ID already has one.');
+    if (!formData.requestor_type) {
+      toast.error('Please select Requestor Type');
       return;
+    }
+    
+    if (!dateValidation.valid) {
+      toast.error(dateValidation.message);
+      return;
+    }
+    
+    if (requestIdWarning && formData.request_type === 'New Request') {
+      const proceed = window.confirm(
+        `${requestIdWarning.message}. Suggested type: "${requestIdWarning.suggested_type}". Continue anyway?`
+      );
+      if (!proceed) return;
     }
     
     setSubmitting(true);
     try {
-      const payload = {
-        assignment_id: selectedAssignment._id,
+      await axios.post(`${API_URL}/verisma-daily-allocations`, {
+        subproject_id: formData.subproject_id,
+        allocation_date: selectedDate,
+        facility: formData.facility,
+        request_id: formData.request_id,
         request_type: formData.request_type,
-        requestor_type: formData.requestor_type || '',
-        request_id: formData.request_id || '',
-        facility: formData.facility || '',
-        bronx_care_processing_time: formData.bronx_care_processing_time || '',
+        requestor_type: formData.requestor_type,
+        bronx_care_processing_time: formData.bronx_care_processing_time,
         count: parseInt(formData.count) || 1,
-        remark: formData.remark || ''
-      };
+        remark: formData.remark,
+        geography_id: selectedLocationInfo?.geography_id || geographyId,
+        geography_name: selectedLocationInfo?.geography_name || geographyName
+      }, getAuthHeaders());
       
-      const response = await axios.post(
-        `${API_URL}/verisma-daily-allocations`,
-        payload,
-        getAuthHeaders()
-      );
+      toast.success('Entry submitted successfully!');
       
-      if (response.data.success) {
-        toast.success(`Entry logged! ${response.data.remaining_pending} assignments remaining.`);
-        
-        setSelectedAssignment(null);
-        setFormData({
-          facility: '',
-          request_id: '',
-          request_type: '',
-          requestor_type: '',
-          bronx_care_processing_time: '',
-          count: 1,
-          remark: ''
-        });
-        setRequestIdWarning(null);
-        
-        fetchData();
-      }
-    } catch (error) {
-      toast.error(error.response?.data?.message || 'Failed to submit');
+      // Reset form but KEEP the selected location for quick additional entries
+      setFormData(prev => ({
+        ...prev,
+        facility: '',
+        request_id: '',
+        request_type: '',
+        requestor_type: '',
+        bronx_care_processing_time: '',
+        count: 1,
+        remark: ''
+        // Keep subproject_id for quick additional entries on same location
+      }));
+      setRequestIdWarning(null);
+      
+      if (onRefresh) onRefresh();
+      
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Failed to create entry');
     } finally {
       setSubmitting(false);
     }
   };
 
-  // ═══════════════════════════════════════════════════════════
-  // HELPERS
-  // ═══════════════════════════════════════════════════════════
-
-  const formatDate = (d) => d ? new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '-';
-  
-  // Group by date
-  const assignmentsByDate = useMemo(() => {
-    const grouped = {};
-    pendingAssignments.forEach(a => {
-      const dateKey = new Date(a.assignment_date).toISOString().split('T')[0];
-      if (!grouped[dateKey]) grouped[dateKey] = [];
-      grouped[dateKey].push(a);
+  // Edit functions
+  const startEdit = (allocation) => {
+    setEditingId(allocation._id);
+    setEditData({
+      facility: allocation.facility || '',
+      request_id: allocation.request_id || '',
+      request_type: allocation.request_type || '',
+      requestor_type: allocation.requestor_type || '',
+      bronx_care_processing_time: allocation.bronx_care_processing_time || '',
+      count: allocation.count || 1,
+      remark: allocation.remark || ''
     });
-    return grouped;
-  }, [pendingAssignments]);
-  
-  const totalTodayCount = useMemo(() => 
-    todaysEntries.reduce((sum, e) => sum + (e.count || 1), 0),
-    [todaysEntries]
-  );
+    setChangeReason('');
+  };
 
-  // ═══════════════════════════════════════════════════════════
-  // RENDER
-  // ═══════════════════════════════════════════════════════════
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditData({});
+    setChangeReason('');
+  };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-600"></div>
-      </div>
-    );
-  }
+  const saveEdit = async () => {
+    if (!changeReason.trim()) {
+      toast.error('Please enter a change reason');
+      return;
+    }
+    
+    try {
+      await axios.put(`${API_URL}/verisma-daily-allocations/${editingId}`, {
+        ...editData,
+        change_reason: changeReason
+      }, getAuthHeaders());
+      
+      cancelEdit();
+      toast.success('Entry updated successfully');
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Failed to update entry');
+    }
+  };
+
+  // Delete request
+  const submitDeleteRequest = async () => {
+    if (!deleteReason.trim()) {
+      toast.error('Please enter a delete reason');
+      return;
+    }
+    
+    try {
+      await axios.post(`${API_URL}/verisma-daily-allocations/${showDeleteModal}/request-delete`, {
+        delete_reason: deleteReason
+      }, getAuthHeaders());
+      
+      setShowDeleteModal(null);
+      setDeleteReason('');
+      if (onRefresh) onRefresh();
+      toast.success('Delete request submitted for admin approval');
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Failed to submit delete request');
+    }
+  };
+
+  // Check if entry is locked
+  const isEntryLocked = (allocation) => {
+    if (allocation.is_locked) return true;
+    
+    const allocDate = new Date(allocation.allocation_date);
+    const lastDayOfMonth = new Date(allocDate.getFullYear(), allocDate.getMonth() + 1, 0);
+    lastDayOfMonth.setHours(23, 59, 59, 999);
+    
+    return new Date() > lastDayOfMonth;
+  };
+
+  // Stats
+  const stats = useMemo(() => {
+    const totalCount = allocations.reduce((sum, a) => sum + (a.count || 1), 0);
+    return {
+      pending: pendingLocations.length,
+      todaysEntries: allocations.length,
+      totalCount: totalCount,
+      totalAssigned: allAssignedLocations.length,
+      locationsLogged: allAssignedLocations.length - pendingLocations.length
+    };
+  }, [pendingLocations, allocations, allAssignedLocations]);
 
   return (
     <div className="space-y-4">
-      
-      {/* Header Stats */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <span className="px-2 py-1 text-xs font-medium bg-orange-100 text-orange-700 rounded">
-            Pending: {pendingAssignments.length}
-          </span>
-          <span className="px-2 py-1 text-xs font-medium bg-blue-100 text-blue-700 rounded">
-            Today's Entries: {todaysEntries.length}
-          </span>
-          <span className="px-2 py-1 text-xs font-medium bg-emerald-100 text-emerald-700 rounded">
-            Total Count: {totalTodayCount}
-          </span>
+      {/* Stats Row */}
+      <div className="flex flex-wrap gap-3">
+        <div className="px-3 py-1.5 bg-orange-100 text-orange-700 rounded text-xs font-medium">
+          Pending Locations: {stats.pending}
         </div>
-        
-        {onNavigateToPrevious && (
-          <button onClick={onNavigateToPrevious} className="text-xs text-blue-600 hover:underline">
-            View Previous →
-          </button>
-        )}
+        <div className="px-3 py-1.5 bg-blue-100 text-blue-700 rounded text-xs font-medium">
+          Today's Entries: {stats.todaysEntries}
+        </div>
+        <div className="px-3 py-1.5 bg-green-100 text-green-700 rounded text-xs font-medium">
+          Locations Logged: {stats.locationsLogged}/{stats.totalAssigned}
+        </div>
+        <div className="px-3 py-1.5 bg-gray-100 text-gray-700 rounded text-xs font-medium">
+          Total Assigned: {stats.totalAssigned}
+        </div>
       </div>
 
-      {/* ═══════════════════════════════════════════════════════ */}
-      {/* BLOCKED MESSAGE */}
-      {/* ═══════════════════════════════════════════════════════ */}
-      {hasPreviousPending && blockedMessage && (
-        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-          <div className="flex items-start gap-3">
-            <span className="text-red-500 text-xl">⚠️</span>
-            <div>
-              <h3 className="text-sm font-semibold text-red-800">Action Required</h3>
-              <p className="text-xs text-red-700 mt-1">{blockedMessage}</p>
-            </div>
-          </div>
+      {/* Info about multiple entries */}
+      {stats.locationsLogged > 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-blue-700 text-xs">
+          💡 <strong>Tip:</strong> You can add multiple Request IDs per location. 
+          {stats.pending > 0 && ` ${stats.pending} location(s) still need at least one entry.`}
+          {stats.pending === 0 && ' All locations have at least one entry!'}
         </div>
       )}
 
-      {/* ═══════════════════════════════════════════════════════ */}
-      {/* PENDING ASSIGNMENTS */}
-      {/* ═══════════════════════════════════════════════════════ */}
-      {pendingAssignments.length > 0 && (
-        <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
-          <div className="px-4 py-2 bg-orange-600 text-white flex items-center justify-between">
-            <h3 className="text-sm font-semibold">Pending Assignments</h3>
-            <span className="text-xs bg-orange-500 px-2 py-0.5 rounded">
-              {pendingAssignments.length} location(s)
-            </span>
-          </div>
-          
-          <div className="p-4 space-y-3">
-            {Object.entries(assignmentsByDate).map(([dateKey, assignments]) => (
-              <div key={dateKey} className="border rounded-lg overflow-hidden">
-                <div className="px-3 py-1.5 bg-gray-100 border-b flex items-center justify-between">
-                  <span className="text-xs font-medium text-gray-700">
-                    {formatDate(dateKey)} — {assignments.length} location(s)
-                  </span>
-                  {new Date(dateKey) < new Date(new Date().toISOString().split('T')[0]) && (
-                    <span className="text-[10px] px-1.5 py-0.5 bg-red-100 text-red-600 rounded font-medium">
-                      OVERDUE
-                    </span>
+      {/* No Locations Warning */}
+      {allAssignedLocations.length === 0 && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-yellow-800">
+          <p className="text-sm font-medium">⚠️ No locations available for this date</p>
+          <p className="text-xs mt-1">
+            You may not have any locations assigned that are effective on or before {selectedDate}.
+          </p>
+        </div>
+      )}
+
+      {/* Date Validation Warning */}
+      {!dateValidation.valid && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-sm">
+          ⚠️ {dateValidation.message}
+        </div>
+      )}
+
+      {/* Add New Entry Form */}
+      <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
+        <div className="px-4 py-2 bg-emerald-600 text-white">
+          <h3 className="text-sm font-semibold">✨ Add New Entry</h3>
+        </div>
+        
+        <div className="p-4">
+          {allAssignedLocations.length === 0 ? (
+            <div className="text-center py-4 text-yellow-600">
+              <p className="text-sm">⚠️ No locations are assigned to you for this date.</p>
+              <p className="text-xs mt-1">Try selecting a more recent date.</p>
+            </div>
+          ) : !dateValidation.valid ? (
+            <div className="text-center py-4 text-red-500">
+              <p className="text-sm">⚠️ Cannot add entries for this date.</p>
+              <p className="text-xs mt-1">{dateValidation.message}</p>
+            </div>
+          ) : (
+            <>
+              {/* Form Row 1 */}
+              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 mb-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Allocation Date</label>
+                  <input 
+                    type="text" 
+                    value={selectedDate} 
+                    readOnly 
+                    className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded bg-gray-50" 
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Resource Name</label>
+                  <input 
+                    type="text" 
+                    value={resourceInfo?.name || ''} 
+                    readOnly 
+                    className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded bg-gray-50" 
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Location <span className="text-red-500">*</span>
+                  </label>
+                  <select 
+                    value={formData.subproject_id} 
+                    onChange={(e) => handleLocationChange(e.target.value)} 
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500"
+                  >
+                    <option value="">-- Select --</option>
+                    {availableLocations.map(loc => {
+                      const entryCount = entriesPerLocation[loc.subproject_id?.toString()] || 0;
+                      return (
+                        <option key={loc.subproject_id} value={loc.subproject_id}>
+                          {loc.subproject_name} {entryCount > 0 ? `(${entryCount} entries)` : '⚠️ Pending'}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+                
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Process</label>
+                  <input 
+                    type="text" 
+                    value={selectedLocationInfo?.project_name || 'Select location'} 
+                    readOnly 
+                    className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded bg-gray-50" 
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Facility</label>
+                  <input 
+                    type="text" 
+                    value={formData.facility} 
+                    onChange={(e) => setFormData(prev => ({ ...prev, facility: e.target.value }))} 
+                    placeholder="Free text" 
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500" 
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Request ID <span className="text-red-500">*</span>
+                  </label>
+                  <input 
+                    type="text" 
+                    value={formData.request_id} 
+                    onChange={(e) => setFormData(prev => ({ ...prev, request_id: e.target.value }))} 
+                    placeholder="Enter ID" 
+                    className={`w-full px-2 py-1.5 text-xs border rounded focus:ring-1 focus:ring-emerald-500 ${
+                      requestIdWarning ? 'border-yellow-400 bg-yellow-50' : 'border-gray-300'
+                    }`} 
+                  />
+                  {requestIdWarning && (
+                    <p className="text-[10px] text-yellow-600 mt-0.5">
+                      ⚠️ Suggest: {requestIdWarning.suggested_type}
+                    </p>
                   )}
                 </div>
                 
-                <div className="divide-y">
-                  {assignments.map(assignment => (
-                    <div
-                      key={assignment._id}
-                      className={`p-3 flex items-center justify-between cursor-pointer transition ${
-                        selectedAssignment?._id === assignment._id
-                          ? 'bg-emerald-50 border-l-4 border-emerald-500'
-                          : 'hover:bg-gray-50'
-                      }`}
-                      onClick={() => handleSelectAssignment(assignment)}
-                    >
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium text-gray-800">
-                            {assignment.subproject_name}
-                          </span>
-                          <span className="text-[10px] px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded">
-                            {assignment.project_name}
-                          </span>
-                        </div>
-                        <div className="text-[10px] text-gray-500 mt-0.5">
-                          {assignment.geography_name}
-                        </div>
-                      </div>
-                      
-                      {selectedAssignment?._id === assignment._id ? (
-                        <span className="text-xs text-emerald-600 font-medium">Selected ✓</span>
-                      ) : (
-                        <span className="text-xs text-gray-400">Click to select</span>
-                      )}
-                    </div>
-                  ))}
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Request Type <span className="text-red-500">*</span>
+                  </label>
+                  <select 
+                    value={formData.request_type} 
+                    onChange={(e) => setFormData(prev => ({ ...prev, request_type: e.target.value }))} 
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500"
+                  >
+                    <option value="">-- Select --</option>
+                    {VERISMA_REQUEST_TYPES.map(type => (
+                      <option key={type} value={type}>{type}</option>
+                    ))}
+                  </select>
+                </div>
+                
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Requestor Type <span className="text-red-500">*</span>
+                  </label>
+                  <select 
+                    value={formData.requestor_type} 
+                    onChange={(e) => setFormData(prev => ({ ...prev, requestor_type: e.target.value }))} 
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500"
+                  >
+                    <option value="">-- Select --</option>
+                    {VERISMA_REQUESTOR_TYPES.map(type => (
+                      <option key={type} value={type}>{type}</option>
+                    ))}
+                  </select>
                 </div>
               </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* No pending */}
-      {pendingAssignments.length === 0 && !hasPreviousPending && (
-        <div className="bg-gray-50 border border-gray-200 rounded-lg p-8 text-center">
-          <div className="text-gray-400 text-3xl mb-2">✓</div>
-          <h3 className="text-sm font-medium text-gray-700">No Pending Assignments</h3>
-          <p className="text-xs text-gray-500 mt-1">All done! Check back later for new assignments.</p>
-        </div>
-      )}
-
-      {/* ═══════════════════════════════════════════════════════ */}
-      {/* ENTRY FORM */}
-      {/* ═══════════════════════════════════════════════════════ */}
-      {selectedAssignment && (
-        <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
-          <div className="px-4 py-2 bg-emerald-600 text-white">
-            <h3 className="text-sm font-semibold">Log Entry: {selectedAssignment.subproject_name}</h3>
-            <p className="text-[10px] text-emerald-100">
-              Date: {formatDate(selectedAssignment.assignment_date)} | Process: {selectedAssignment.project_name}
-            </p>
-          </div>
-          
-          <div className="p-4">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Facility</label>
-                <input
-                  type="text"
-                  value={formData.facility}
-                  onChange={(e) => handleFormChange('facility', e.target.value)}
-                  className="w-full px-2 py-1.5 text-xs border rounded focus:ring-1 focus:ring-emerald-500"
-                  placeholder="Free Text"
-                />
-              </div>
               
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
-                  Request ID <span className="text-red-500">*</span>
-                </label>
-                <div className="relative">
-                  <input
-                    type="text"
-                    value={formData.request_id}
-                    onChange={(e) => handleFormChange('request_id', e.target.value)}
-                    className={`w-full px-2 py-1.5 text-xs border rounded ${
-                      requestIdWarning?.type === 'error' ? 'border-red-300' : ''
-                    }`}
-                    placeholder="Enter ID"
+              {/* Form Row 2 */}
+              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 items-end">
+                <div className="col-span-2">
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Remark</label>
+                  <input 
+                    type="text" 
+                    value={formData.remark} 
+                    onChange={(e) => setFormData(prev => ({ ...prev, remark: e.target.value }))} 
+                    placeholder="Optional" 
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500" 
                   />
-                  {checkingRequestId && (
-                    <div className="absolute right-2 top-1/2 -translate-y-1/2">
-                      <div className="animate-spin h-3 w-3 border border-gray-400 border-t-transparent rounded-full"></div>
-                    </div>
+                </div>
+                
+                <div className="col-span-2 lg:col-span-6 flex justify-end gap-2">
+                  <button 
+                    onClick={handleSubmit} 
+                    disabled={submitting || !formData.subproject_id || !formData.request_type || !formData.requestor_type || !formData.request_id || !dateValidation.valid} 
+                    className="px-6 py-1.5 bg-emerald-600 text-white text-xs font-medium rounded hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                  >
+                    {submitting ? 'Submitting...' : 'Submit Entry'}
+                  </button>
+                  
+                  {formData.subproject_id && (
+                    <button 
+                      onClick={() => {
+                        setFormData({
+                          subproject_id: '',
+                          facility: '',
+                          request_id: '',
+                          request_type: '',
+                          requestor_type: '',
+                          bronx_care_processing_time: '',
+                          count: 1,
+                          remark: ''
+                        });
+                        setSelectedLocationInfo(null);
+                      }}
+                      className="px-3 py-1.5 bg-gray-200 text-gray-700 text-xs font-medium rounded hover:bg-gray-300"
+                    >
+                      Clear
+                    </button>
                   )}
                 </div>
               </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
-                  Request Type <span className="text-red-500">*</span>
-                </label>
-                <select
-                  value={formData.request_type}
-                  onChange={(e) => handleFormChange('request_type', e.target.value)}
-                  className="w-full px-2 py-1.5 text-xs border rounded"
-                >
-                  <option value="">-- Select --</option>
-                  {VERISMA_REQUEST_TYPES.map(t => (
-                    <option 
-                      key={t} 
-                      value={t}
-                      disabled={t === 'New Request' && requestIdWarning?.type === 'error'}
-                    >
-                      {t}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
-                  Requestor Type <span className="text-red-500">*</span>
-                </label>
-                <select
-                  value={formData.requestor_type}
-                  onChange={(e) => handleFormChange('requestor_type', e.target.value)}
-                  className="w-full px-2 py-1.5 text-xs border rounded"
-                >
-                  <option value="">-- Select --</option>
-                  {VERISMA_REQUESTOR_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Bronx Care Time</label>
-                <input
-                  type="text"
-                  value={formData.bronx_care_processing_time}
-                  onChange={(e) => handleFormChange('bronx_care_processing_time', e.target.value)}
-                  className="w-full px-2 py-1.5 text-xs border rounded"
-                  placeholder="e.g., 2h 30m"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Count</label>
-                <input
-                  type="number"
-                  min="1"
-                  value={formData.count}
-                  onChange={(e) => handleFormChange('count', e.target.value)}
-                  className="w-full px-2 py-1.5 text-xs border rounded"
-                />
-              </div>
-              
-              <div className="col-span-2">
-                <label className="block text-xs font-medium text-gray-600 mb-1">Remark</label>
-                <input
-                  type="text"
-                  value={formData.remark}
-                  onChange={(e) => handleFormChange('remark', e.target.value)}
-                  className="w-full px-2 py-1.5 text-xs border rounded"
-                  placeholder="Optional"
-                />
-              </div>
-            </div>
-            
-            {requestIdWarning && (
-              <div className={`mt-3 p-2 rounded text-xs ${
-                requestIdWarning.type === 'error' 
-                  ? 'bg-red-50 border border-red-200 text-red-700'
-                  : 'bg-yellow-50 border border-yellow-200 text-yellow-700'
-              }`}>
-                ⚠️ {requestIdWarning.message}
-              </div>
-            )}
-            
-            <div className="mt-4 flex items-center gap-3">
-              <button
-                onClick={handleSubmit}
-                disabled={submitting || !formData.request_type}
-                className="px-4 py-2 text-xs font-medium bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:bg-gray-300"
-              >
-                {submitting ? 'Submitting...' : 'Submit Entry'}
-              </button>
-              
-              <button
-                onClick={() => setSelectedAssignment(null)}
-                className="px-4 py-2 text-xs font-medium bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
+            </>
+          )}
         </div>
-      )}
+      </div>
 
-      {/* ═══════════════════════════════════════════════════════ */}
-      {/* TODAY'S LOGGED ENTRIES */}
-      {/* ═══════════════════════════════════════════════════════ */}
+      {/* Entries Table */}
       <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
-        <div className="px-4 py-2 bg-gray-700 text-white flex items-center justify-between">
-          <h3 className="text-sm font-semibold">Today's Logged Entries</h3>
-          <span className="text-xs bg-gray-600 px-2 py-0.5 rounded">{todaysEntries.length} records</span>
+        <div className="px-4 py-2 bg-gray-700 text-white flex justify-between items-center">
+          <h3 className="text-sm font-semibold">📋 Entries for {selectedDate}</h3>
+          <span className="text-xs bg-gray-600 px-2 py-0.5 rounded">{allocations.length} entries</span>
         </div>
-        
-        {todaysEntries.length === 0 ? (
-          <div className="p-6 text-center text-gray-500 text-sm">No entries logged today</div>
+
+        {loading ? (
+          <div className="p-4 text-center text-gray-500">Loading...</div>
+        ) : allocations.length === 0 ? (
+          <div className="p-4 text-center text-gray-500 text-sm">No entries logged for this date yet</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="min-w-full text-xs">
-              <thead className="bg-gray-100">
+              <thead className="bg-gray-100 text-gray-700">
                 <tr>
-                  <th className="px-2 py-2 text-left font-semibold">SR#</th>
-                  <th className="px-2 py-2 text-left font-semibold">Process</th>
-                  <th className="px-2 py-2 text-left font-semibold">Location</th>
-                  <th className="px-2 py-2 text-left font-semibold">Facility</th>
-                  <th className="px-2 py-2 text-left font-semibold">Request ID</th>
-                  <th className="px-2 py-2 text-left font-semibold">Request Type</th>
-                  <th className="px-2 py-2 text-left font-semibold">Requestor Type</th>
-                  <th className="px-2 py-2 text-center font-semibold">Count</th>
-                  <th className="px-2 py-2 text-left font-semibold">Remark</th>
+                  <th className="px-2 py-2 text-left font-semibold border-r">SR#</th>
+                  <th className="px-2 py-2 text-left font-semibold border-r">Location</th>
+                  <th className="px-2 py-2 text-left font-semibold border-r">Process</th>
+                  <th className="px-2 py-2 text-left font-semibold border-r">Facility</th>
+                  <th className="px-2 py-2 text-left font-semibold border-r">Request ID</th>
+                  <th className="px-2 py-2 text-left font-semibold border-r">Request Type</th>
+                  <th className="px-2 py-2 text-left font-semibold border-r">Requestor Type</th>
+                  <th className="px-2 py-2 text-left font-semibold border-r">Remark</th>
+                  <th className="px-2 py-2 text-center font-semibold w-24">Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y">
-                {todaysEntries.map((entry, idx) => (
-                  <tr key={entry._id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                    <td className="px-2 py-2 font-medium">{entry.sr_no}</td>
-                    <td className="px-2 py-2">
-                      <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px]">
-                        {entry.process || entry.project_name}
-                      </span>
-                    </td>
-                    <td className="px-2 py-2 font-medium">{entry.subproject_name}</td>
-                    <td className="px-2 py-2">{entry.facility || '-'}</td>
-                    <td className="px-2 py-2">{entry.request_id || '-'}</td>
-                    <td className="px-2 py-2">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                        entry.request_type === 'New Request' ? 'bg-emerald-100 text-emerald-700' :
-                        entry.request_type === 'Duplicate' ? 'bg-orange-100 text-orange-700' :
-                        'bg-purple-100 text-purple-700'
-                      }`}>
-                        {entry.request_type}
-                      </span>
-                    </td>
-                    <td className="px-2 py-2">{entry.requestor_type || '-'}</td>
-                    <td className="px-2 py-2 text-center font-medium">{entry.count || 1}</td>
-                    <td className="px-2 py-2">{entry.remark || '-'}</td>
-                  </tr>
-                ))}
+              <tbody className="divide-y divide-gray-100">
+                {allocations.map((alloc, idx) => {
+                  const isEditing = editingId === alloc._id;
+                  const locked = isEntryLocked(alloc);
+                  
+                  return (
+                    <React.Fragment key={alloc._id}>
+                      <tr className={`${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'} ${isEditing ? 'bg-yellow-50' : ''}`}>
+                        <td className="px-2 py-1.5 font-medium border-r">{alloc.sr_no}</td>
+                        <td className="px-2 py-1.5 border-r font-medium">{alloc.subproject_name}</td>
+                        <td className="px-2 py-1.5 border-r">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-700">
+                            {alloc.process || alloc.project_name}
+                          </span>
+                        </td>
+                        <td className="px-1 py-1 border-r">
+                          {isEditing ? (
+                            <input 
+                              type="text" 
+                              value={editData.facility} 
+                              onChange={(e) => setEditData(prev => ({ ...prev, facility: e.target.value }))} 
+                              className="w-full px-1 py-0.5 text-xs border border-yellow-400 rounded" 
+                            />
+                          ) : (alloc.facility || '-')}
+                        </td>
+                        <td className="px-1 py-1 border-r">
+                          {isEditing ? (
+                            <input 
+                              type="text" 
+                              value={editData.request_id} 
+                              onChange={(e) => setEditData(prev => ({ ...prev, request_id: e.target.value }))} 
+                              className="w-full px-1 py-0.5 text-xs border border-yellow-400 rounded" 
+                            />
+                          ) : (alloc.request_id || '-')}
+                        </td>
+                        <td className="px-1 py-1 border-r">
+                          {isEditing ? (
+                            <select 
+                              value={editData.request_type} 
+                              onChange={(e) => setEditData(prev => ({ ...prev, request_type: e.target.value }))} 
+                              className="w-full px-1 py-0.5 text-xs border border-yellow-400 rounded"
+                            >
+                              {VERISMA_REQUEST_TYPES.map(t => (
+                                <option key={t} value={t}>{t}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                              alloc.request_type === 'New Request' ? 'bg-emerald-100 text-emerald-700' :
+                              alloc.request_type === 'Duplicate' ? 'bg-orange-100 text-orange-700' :
+                              'bg-purple-100 text-purple-700'
+                            }`}>
+                              {alloc.request_type}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-1 py-1 border-r">
+                          {isEditing ? (
+                            <select 
+                              value={editData.requestor_type} 
+                              onChange={(e) => setEditData(prev => ({ ...prev, requestor_type: e.target.value }))} 
+                              className="w-full px-1 py-0.5 text-xs border border-yellow-400 rounded"
+                            >
+                              <option value="">--</option>
+                              {VERISMA_REQUESTOR_TYPES.map(t => (
+                                <option key={t} value={t}>{t}</option>
+                              ))}
+                            </select>
+                          ) : (alloc.requestor_type || '-')}
+                        </td>
+                        <td className="px-1 py-1 border-r">
+                          {isEditing ? (
+                            <input 
+                              type="text" 
+                              value={editData.remark} 
+                              onChange={(e) => setEditData(prev => ({ ...prev, remark: e.target.value }))} 
+                              className="w-full px-1 py-0.5 text-xs border border-yellow-400 rounded" 
+                            />
+                          ) : (alloc.remark || '-')}
+                        </td>
+                        <td className="px-2 py-1.5 text-center">
+                          {locked ? (
+                            <span className="text-gray-400 text-[10px]">🔒 Locked</span>
+                          ) : isEditing ? (
+                            <div className="flex gap-1 justify-center">
+                              <button 
+                                onClick={saveEdit} 
+                                className="px-1.5 py-0.5 text-[10px] bg-green-500 text-white rounded hover:bg-green-600"
+                              >
+                                Save
+                              </button>
+                              <button 
+                                onClick={cancelEdit} 
+                                className="px-1.5 py-0.5 text-[10px] bg-gray-400 text-white rounded hover:bg-gray-500"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex gap-1 justify-center">
+                              <button 
+                                onClick={() => startEdit(alloc)} 
+                                className="px-1.5 py-0.5 text-[10px] bg-blue-500 text-white rounded hover:bg-blue-600"
+                              >
+                                Edit
+                              </button>
+                              <button 
+                                onClick={() => setShowDeleteModal(alloc._id)} 
+                                disabled={alloc.has_pending_delete_request} 
+                                className="px-1.5 py-0.5 text-[10px] bg-red-500 text-white rounded hover:bg-red-600 disabled:bg-red-300"
+                              >
+                                Del
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                      
+                      {isEditing && (
+                        <tr className="bg-yellow-50">
+                          <td colSpan={9} className="px-4 py-2">
+                            <div className="flex gap-4 items-end">
+                              <div className="flex-1">
+                                <label className="block text-xs font-medium text-yellow-800 mb-1">
+                                  Change Reason <span className="text-red-500">*</span>
+                                </label>
+                                <input 
+                                  type="text" 
+                                  value={changeReason} 
+                                  onChange={(e) => setChangeReason(e.target.value)} 
+                                  className="w-full px-2 py-1.5 text-xs border border-yellow-400 rounded" 
+                                  placeholder="Why are you making this change?" 
+                                />
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
       </div>
+
+      {/* Delete Modal */}
+      {showDeleteModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-96 p-4">
+            <h3 className="text-sm font-semibold text-gray-800 mb-3">Request Deletion</h3>
+            <p className="text-xs text-gray-600 mb-3">
+              Your delete request will be sent to an admin for approval.
+            </p>
+            <textarea 
+              value={deleteReason} 
+              onChange={(e) => setDeleteReason(e.target.value)} 
+              className="w-full px-3 py-2 text-xs border border-gray-300 rounded" 
+              rows={3} 
+              placeholder="Enter delete reason (required)" 
+            />
+            <div className="flex justify-end gap-2 mt-4">
+              <button 
+                onClick={() => { setShowDeleteModal(null); setDeleteReason(''); }} 
+                className="px-3 py-1.5 text-xs bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={submitDeleteRequest} 
+                disabled={!deleteReason.trim()} 
+                className="px-3 py-1.5 text-xs bg-red-500 text-white rounded hover:bg-red-600 disabled:bg-red-300"
+              >
+                Submit Request
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -1,5 +1,6 @@
 // pages/dashboards/VerismaDashboard.jsx - VERISMA CLIENT DASHBOARD
 // Updated to fetch from resource-logged daily allocations
+// FIXED: PST timezone, resource dropdown, month-wise billing filters
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { toast } from 'react-hot-toast';
@@ -152,6 +153,24 @@ const AsyncSelect = ({
 };
 
 // =============================================
+// PST TIMEZONE HELPER
+// =============================================
+const getPSTDate = () => {
+  const now = new Date();
+  // PST is UTC-8 (or PDT UTC-7 during daylight saving)
+  // Using -8 for standard PST
+  const pstOffset = -8 * 60; // PST offset in minutes
+  const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
+  return new Date(utcTime + (pstOffset * 60000));
+};
+
+const formatDateForAPI = (date) => {
+  if (!date) return null;
+  const d = new Date(date);
+  return d.toISOString().split('T')[0];
+};
+
+// =============================================
 // VERISMA DASHBOARD COMPONENT
 // =============================================
 
@@ -159,12 +178,14 @@ const VerismaDashboard = () => {
   // State declarations
   const [geographiesData, setGeographiesData] = useState([]);
   const [resources, setResources] = useState([]);
+  const [allResources, setAllResources] = useState([]); // Store all resources for filtering
   const [filters, setFilters] = useState({
     geography: '',
     resource_id: '',
+    resource_email: '', // Added for proper filtering
     subproject_id: '',
     request_type: '',
-    month: 'all',
+    month: (new Date().getMonth() + 1).toString(), // Default to current month
     year: new Date().getFullYear().toString(),
     startDate: '',
     endDate: ''
@@ -217,31 +238,72 @@ const VerismaDashboard = () => {
     fetchGeographies();
   }, []);
 
-  // Fetch resources for filter dropdown
+  // Fetch resources for filter dropdown - FIXED
   useEffect(() => {
     const fetchResources = async () => {
       try {
         const token = getAuthToken();
         const response = await fetch(`${apiBaseUrl}/resource`, {
           headers: {
-            'Authorization': `Bearer ${token}`
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
           }
         });
+        
+        if (!response.ok) {
+          throw new Error('Failed to fetch resources');
+        }
+        
         const data = await response.json();
+        const resourceList = data.resources || data || [];
+        
+        // Store all resources
+        setAllResources(resourceList);
+        
         // Filter to only Verisma-assigned resources
-        const verismaResources = (data.resources || data || []).filter(r => 
-          r.assignments?.some(a => a.client_name?.toLowerCase() === 'verisma')
-        );
-        setResources(verismaResources);
+        // Check both assignments array and direct client assignments
+        const verismaResources = resourceList.filter(r => {
+          // Check assignments array
+          if (r.assignments && Array.isArray(r.assignments)) {
+            return r.assignments.some(a => 
+              a.client_name?.toLowerCase() === 'verisma' ||
+              a.client?.name?.toLowerCase() === 'verisma'
+            );
+          }
+          // Check direct client_name field
+          if (r.client_name?.toLowerCase() === 'verisma') {
+            return true;
+          }
+          // Check allocated_clients array
+          if (r.allocated_clients && Array.isArray(r.allocated_clients)) {
+            return r.allocated_clients.some(c => 
+              c.client_name?.toLowerCase() === 'verisma' ||
+              c.name?.toLowerCase() === 'verisma'
+            );
+          }
+          return false;
+        });
+        
+        // If no Verisma-specific resources found, show all resources
+        // This handles cases where assignment filtering doesn't work
+        if (verismaResources.length === 0) {
+          console.log('No Verisma-specific resources found, showing all resources');
+          setResources(resourceList);
+        } else {
+          setResources(verismaResources);
+        }
+        
       } catch (error) {
         console.error('Error fetching resources:', error);
+        toast.error('Failed to load resources');
       }
     };
     fetchResources();
   }, []);
 
-  // Build date range from filters
+  // Build date range from filters - FIXED for month-wise billing
   const getDateRange = useCallback(() => {
+    // Priority 1: Use explicit date range if provided
     if (filters.startDate && filters.endDate) {
       return {
         start_date: filters.startDate,
@@ -249,24 +311,29 @@ const VerismaDashboard = () => {
       };
     }
     
+    // Priority 2: Use month/year filters
     const year = parseInt(filters.year);
-    if (filters.month !== 'all') {
+    
+    if (filters.month && filters.month !== 'all') {
       const month = parseInt(filters.month);
+      // Create date in local timezone to avoid off-by-one errors
       const startDate = new Date(year, month - 1, 1);
-      const endDate = new Date(year, month, 0);
+      const endDate = new Date(year, month, 0); // Last day of month
+      
       return {
-        start_date: startDate.toISOString().split('T')[0],
-        end_date: endDate.toISOString().split('T')[0]
+        start_date: `${year}-${String(month).padStart(2, '0')}-01`,
+        end_date: `${year}-${String(month).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`
       };
     }
     
+    // Priority 3: Full year
     return {
       start_date: `${year}-01-01`,
       end_date: `${year}-12-31`
     };
   }, [filters.startDate, filters.endDate, filters.month, filters.year]);
 
-  // Fetch all allocations from the new admin endpoint
+  // Fetch all allocations from the new admin endpoint - FIXED
   const fetchAllocations = useCallback(async (page = 1) => {
     setIsLoading(true);
     
@@ -274,16 +341,31 @@ const VerismaDashboard = () => {
       const token = getAuthToken();
       const dateRange = getDateRange();
       
+      console.log('Fetching with date range:', dateRange);
+      console.log('Filters:', filters);
+      
       const params = new URLSearchParams({
         start_date: dateRange.start_date,
         end_date: dateRange.end_date,
         page: page.toString(),
-        limit: '100'
+        limit: '500' // Increased limit for better data aggregation
       });
 
-      if (filters.resource_id) params.append('resource_id', filters.resource_id);
+      // FIXED: Use resource_email instead of resource_id for filtering
+      if (filters.resource_email) {
+        params.append('resource_email', filters.resource_email);
+      } else if (filters.resource_id) {
+        // Find the resource email from the selected resource_id
+        const selectedResource = allResources.find(r => r._id === filters.resource_id);
+        if (selectedResource?.email) {
+          params.append('resource_email', selectedResource.email);
+        }
+      }
+      
       if (filters.subproject_id) params.append('subproject_id', filters.subproject_id);
       if (filters.request_type) params.append('request_type', filters.request_type);
+
+      console.log('API params:', params.toString());
 
       const response = await fetch(`${apiBaseUrl}/verisma-daily-allocations/admin/all?${params}`, {
         headers: {
@@ -293,16 +375,19 @@ const VerismaDashboard = () => {
       });
 
       if (!response.ok) {
-        throw new Error('Failed to fetch allocations');
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || 'Failed to fetch allocations');
       }
 
       const data = await response.json();
+      console.log('API Response:', data);
+      
       setAllocations(data.allocations || []);
-      setPagination(data.pagination || {
-        currentPage: 1,
-        totalPages: 1,
-        totalItems: 0,
-        itemsPerPage: 100
+      setPagination({
+        currentPage: data.page || 1,
+        totalPages: data.pages || 1,
+        totalItems: data.total || 0,
+        itemsPerPage: 500
       });
 
       // Process allocations into summary format
@@ -312,27 +397,38 @@ const VerismaDashboard = () => {
       console.error("Error loading allocations:", error);
       toast.error(error.message || 'Failed to load allocation data');
       setAllocations([]);
+      setSummaryData([]);
+      setTotals(null);
+      setGrandTotals(null);
     } finally {
       setIsLoading(false);
     }
-  }, [filters, getDateRange]);
+  }, [filters, getDateRange, allResources]);
 
-  // Process raw allocations into location-based summary
+  // Process raw allocations into location-based summary - FIXED
   const processAllocationsIntoSummary = useCallback((allocs) => {
+    if (!allocs || allocs.length === 0) {
+      setSummaryData([]);
+      setTotals(null);
+      setGrandTotals(null);
+      return;
+    }
+
     // Group by location + project
     const locationMap = new Map();
     
     allocs.forEach(alloc => {
-      const key = `${alloc.subproject_id}-${alloc.project_id}`;
+      const key = `${alloc.subproject_id || alloc.subproject_name}-${alloc.project_id || alloc.project_name}`;
       
       if (!locationMap.has(key)) {
         locationMap.set(key, {
-          location: alloc.subproject_name,
+          location: alloc.subproject_name || 'Unknown Location',
           subproject_id: alloc.subproject_id,
-          processType: alloc.project_name,
+          processType: alloc.project_name || alloc.process || 'Unknown Process',
           project_id: alloc.project_id,
-          geography_name: alloc.geography_name,
-          geographyType: alloc.geography_name?.toLowerCase().includes('us') ? 'onshore' : 'offshore',
+          geography_name: alloc.geography_name || '',
+          geographyType: alloc.geography_type || 
+            (alloc.geography_name?.toLowerCase().includes('us') ? 'onshore' : 'offshore'),
           duplicateHours: 0,
           duplicateTotal: 0,
           keyHours: 0,
@@ -345,8 +441,8 @@ const VerismaDashboard = () => {
       }
       
       const entry = locationMap.get(key);
-      const count = alloc.count || 1;
-      const amount = alloc.billing_amount || 0;
+      const count = parseInt(alloc.count) || 1;
+      const amount = parseFloat(alloc.billing_amount) || 0;
       
       if (alloc.request_type === 'Duplicate') {
         entry.duplicateHours += count;
@@ -367,9 +463,10 @@ const VerismaDashboard = () => {
     
     // Apply search filter
     if (searchTerm) {
+      const searchLower = searchTerm.toLowerCase();
       summaryArray = summaryArray.filter(row => 
-        row.location?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        row.processType?.toLowerCase().includes(searchTerm.toLowerCase())
+        row.location?.toLowerCase().includes(searchLower) ||
+        row.processType?.toLowerCase().includes(searchLower)
       );
     }
 
@@ -385,16 +482,16 @@ const VerismaDashboard = () => {
 
     setSummaryData(summaryArray);
 
-    // Calculate totals for current page
-    const pageTotals = summaryArray.reduce((acc, row) => ({
-      duplicateHours: acc.duplicateHours + row.duplicateHours,
-      duplicateTotal: acc.duplicateTotal + row.duplicateTotal,
-      keyHours: acc.keyHours + row.keyHours,
-      keyTotal: acc.keyTotal + row.keyTotal,
-      newRequestHours: acc.newRequestHours + row.newRequestHours,
-      newRequestTotal: acc.newRequestTotal + row.newRequestTotal,
-      totalCasesHours: acc.totalCasesHours + row.totalCasesHours,
-      totalBilling: acc.totalBilling + row.totalBilling
+    // Calculate totals
+    const calculatedTotals = summaryArray.reduce((acc, row) => ({
+      duplicateHours: acc.duplicateHours + (row.duplicateHours || 0),
+      duplicateTotal: acc.duplicateTotal + (row.duplicateTotal || 0),
+      keyHours: acc.keyHours + (row.keyHours || 0),
+      keyTotal: acc.keyTotal + (row.keyTotal || 0),
+      newRequestHours: acc.newRequestHours + (row.newRequestHours || 0),
+      newRequestTotal: acc.newRequestTotal + (row.newRequestTotal || 0),
+      totalCasesHours: acc.totalCasesHours + (row.totalCasesHours || 0),
+      totalBilling: acc.totalBilling + (row.totalBilling || 0)
     }), {
       duplicateHours: 0, duplicateTotal: 0,
       keyHours: 0, keyTotal: 0,
@@ -402,8 +499,8 @@ const VerismaDashboard = () => {
       totalCasesHours: 0, totalBilling: 0
     });
 
-    setTotals(pageTotals);
-    setGrandTotals(pageTotals); // In this view, grand totals = page totals since we're processing all fetched data
+    setTotals(calculatedTotals);
+    setGrandTotals(calculatedTotals);
   }, [searchTerm, filters.geography, geographiesData]);
 
   // Fetch data when filters change
@@ -412,12 +509,47 @@ const VerismaDashboard = () => {
       fetchAllocations(1);
     }, 300);
     return () => clearTimeout(timer);
-  }, [filters, searchTerm, fetchAllocations]);
+  }, [filters.month, filters.year, filters.resource_id, filters.resource_email, 
+      filters.geography, filters.request_type, filters.startDate, filters.endDate]);
 
-  // Handle filter changes
+  // Re-process when search term changes (no need to refetch)
+  useEffect(() => {
+    if (allocations.length > 0) {
+      processAllocationsIntoSummary(allocations);
+    }
+  }, [searchTerm, processAllocationsIntoSummary, allocations]);
+
+  // Handle filter changes - FIXED
   const handleFilterChange = (e) => {
     const { id, value } = e.target;
-    setFilters(prev => ({ ...prev, [id]: value }));
+    
+    // Special handling for resource_id to also set resource_email
+    if (id === 'resource_id') {
+      const selectedResource = allResources.find(r => r._id === value);
+      setFilters(prev => ({ 
+        ...prev, 
+        resource_id: value,
+        resource_email: selectedResource?.email || ''
+      }));
+    } else {
+      setFilters(prev => ({ ...prev, [id]: value }));
+    }
+  };
+
+  // Clear all filters
+  const clearFilters = () => {
+    setFilters({
+      geography: '',
+      resource_id: '',
+      resource_email: '',
+      subproject_id: '',
+      request_type: '',
+      month: (new Date().getMonth() + 1).toString(),
+      year: new Date().getFullYear().toString(),
+      startDate: '',
+      endDate: ''
+    });
+    setSearchTerm('');
   };
 
   // Sorting
@@ -431,6 +563,9 @@ const VerismaDashboard = () => {
   const sortedData = [...summaryData].sort((a, b) => {
     const aVal = a[sortConfig.key];
     const bVal = b[sortConfig.key];
+    
+    if (aVal === undefined || aVal === null) return 1;
+    if (bVal === undefined || bVal === null) return -1;
     
     if (typeof aVal === 'string') {
       return sortConfig.direction === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
@@ -508,7 +643,7 @@ const VerismaDashboard = () => {
       
       const dateRange = filters.startDate && filters.endDate 
         ? `${filters.startDate}-to-${filters.endDate}`
-        : `${filters.year}-${filters.month !== 'all' ? filters.month : 'all'}`;
+        : `${filters.year}-${filters.month !== 'all' ? filters.month.padStart(2, '0') : 'all'}`;
       
       a.download = `verisma-billing-${dateRange}-${sortedData.length}-records.csv`;
       document.body.appendChild(a);
@@ -524,6 +659,13 @@ const VerismaDashboard = () => {
       toast.dismiss(loadingToast);
       toast.error(error.message || 'Failed to export data.');
     }
+  };
+
+  // Get current month name for display
+  const getMonthName = (monthNum) => {
+    if (monthNum === 'all') return 'All Months';
+    const date = new Date(2000, parseInt(monthNum) - 1, 1);
+    return date.toLocaleString('default', { month: 'long' });
   };
 
   // Column definitions
@@ -553,10 +695,16 @@ const VerismaDashboard = () => {
             </div>
             <div className="text-sm text-blue-700">
               Viewing data logged by resources via daily allocation entry
+              <span className="ml-2 text-xs text-blue-500">(Timezone: PST)</span>
             </div>
           </div>
-          <div className="text-xs text-blue-600">
-            Total Records: {formatNumber(pagination.totalItems || allocations.length)}
+          <div className="text-right">
+            <div className="text-xs text-blue-600">
+              Total Records: {formatNumber(pagination.totalItems || allocations.length)}
+            </div>
+            <div className="text-xs text-blue-500">
+              Period: {getMonthName(filters.month)} {filters.year}
+            </div>
           </div>
         </div>
       </div>
@@ -581,9 +729,11 @@ const VerismaDashboard = () => {
             </select>
           </div>
 
-          {/* Resource Filter */}
+          {/* Resource Filter - FIXED */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Resource</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Resource {resources.length > 0 && <span className="text-xs text-gray-400">({resources.length})</span>}
+            </label>
             <select
               id="resource_id"
               value={filters.resource_id}
@@ -592,7 +742,9 @@ const VerismaDashboard = () => {
             >
               <option value="">All Resources</option>
               {resources.map(r => (
-                <option key={r._id} value={r._id}>{r.name}</option>
+                <option key={r._id} value={r._id}>
+                  {r.name} {r.email ? `(${r.email})` : ''}
+                </option>
               ))}
             </select>
           </div>
@@ -613,7 +765,7 @@ const VerismaDashboard = () => {
             </select>
           </div>
 
-          {/* Month Filter */}
+          {/* Month Filter - FIXED */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Month</label>
             <select
@@ -624,7 +776,7 @@ const VerismaDashboard = () => {
             >
               <option value="all">All Months</option>
               {Array.from({ length: 12 }, (_, i) => (
-                <option key={i + 1} value={i + 1}>
+                <option key={i + 1} value={(i + 1).toString()}>
                   {new Date(0, i).toLocaleString('default', { month: 'long' })}
                 </option>
               ))}
@@ -684,17 +836,38 @@ const VerismaDashboard = () => {
           </div>
         </div>
 
-        {/* Date Range Display */}
-        {(filters.startDate || filters.endDate) && (
-          <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-lg">
-            <div className="flex items-center space-x-2 text-sm text-green-800">
-              <span className="font-semibold">📅 Filtered Date Range:</span>
-              <span>{filters.startDate || 'Beginning'} to {filters.endDate || 'End'}</span>
+        {/* Active Filters Display */}
+        {(filters.startDate || filters.endDate || filters.resource_id || filters.geography || filters.request_type) && (
+          <div className="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+            <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="font-semibold text-yellow-800">Active Filters:</span>
+                {filters.resource_id && (
+                  <span className="px-2 py-1 bg-yellow-100 rounded text-yellow-800">
+                    Resource: {resources.find(r => r._id === filters.resource_id)?.name || 'Selected'}
+                  </span>
+                )}
+                {filters.geography && (
+                  <span className="px-2 py-1 bg-yellow-100 rounded text-yellow-800">
+                    Geography: {geographiesData.find(g => g._id === filters.geography)?.name || 'Selected'}
+                  </span>
+                )}
+                {filters.request_type && (
+                  <span className="px-2 py-1 bg-yellow-100 rounded text-yellow-800">
+                    Type: {filters.request_type}
+                  </span>
+                )}
+                {(filters.startDate || filters.endDate) && (
+                  <span className="px-2 py-1 bg-yellow-100 rounded text-yellow-800">
+                    📅 {filters.startDate || 'Start'} to {filters.endDate || 'End'}
+                  </span>
+                )}
+              </div>
               <button
-                onClick={() => setFilters(prev => ({ ...prev, startDate: '', endDate: '' }))}
-                className="ml-auto text-red-600 hover:text-red-800 font-medium"
+                onClick={clearFilters}
+                className="text-red-600 hover:text-red-800 font-medium text-sm"
               >
-                Clear Dates
+                Clear All Filters
               </button>
             </div>
           </div>
@@ -703,15 +876,25 @@ const VerismaDashboard = () => {
         {/* Action Bar */}
         <div className="flex justify-between items-center mt-4 pt-4 border-t">
           <div className="text-sm text-gray-600">
-            Showing <span className="font-semibold">{sortedData.length}</span> records
+            Showing <span className="font-semibold">{sortedData.length}</span> location summaries 
+            from <span className="font-semibold">{allocations.length}</span> entries
           </div>
-          <button
-            onClick={exportToCSV}
-            disabled={sortedData.length === 0 || isLoading}
-            className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center space-x-2"
-          >
-            <span className="font-semibold text-sm">Export CSV</span>
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => fetchAllocations(1)}
+              disabled={isLoading}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center space-x-2"
+            >
+              <span className="font-semibold text-sm">{isLoading ? 'Loading...' : 'Refresh'}</span>
+            </button>
+            <button
+              onClick={exportToCSV}
+              disabled={sortedData.length === 0 || isLoading}
+              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center space-x-2"
+            >
+              <span className="font-semibold text-sm">Export CSV</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -770,7 +953,11 @@ const VerismaDashboard = () => {
                     <div className="text-gray-500">
                       <div className="text-4xl mb-2">📊</div>
                       <p className="font-medium">No data found</p>
-                      <p className="text-sm">Resources haven't logged any allocations for this period</p>
+                      <p className="text-sm">
+                        {allocations.length === 0 
+                          ? `No allocations logged for ${getMonthName(filters.month)} ${filters.year}`
+                          : 'Try adjusting your search or filters'}
+                      </p>
                     </div>
                   </td>
                 </tr>
@@ -870,7 +1057,7 @@ const VerismaDashboard = () => {
       </div>
 
       {/* Summary Cards */}
-      {grandTotals && (
+      {grandTotals && grandTotals.totalCasesHours > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-white rounded-xl shadow-md p-4 border-l-4 border-orange-500">
             <div className="text-sm text-gray-500 uppercase tracking-wider">Duplicate</div>

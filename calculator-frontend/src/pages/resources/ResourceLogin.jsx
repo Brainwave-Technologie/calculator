@@ -356,7 +356,7 @@ const ResourceLogin = () => {
 
           {/* Footer Links */}
           <div className="mt-8 pt-6 border-t text-center">
-            <Link to="/login" className="text-sm text-gray-600 hover:text-blue-600">
+            <Link to="/login" className="text-sm border border-gray-500 p-2 bg-slate-50 rounded-md  text-gray-600 hover:text-blue-600">
               Admin Login →
             </Link>
           </div>

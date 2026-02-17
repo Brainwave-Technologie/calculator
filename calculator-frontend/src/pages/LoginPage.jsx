@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { FiMail, FiLock, FiLogIn ,FiEye,FiEyeOff} from "react-icons/fi";
 import { FaCalculator } from "react-icons/fa6";
 import { loginUser } from '../services/authService.js'
@@ -31,20 +31,21 @@ const LoginPage = () => {
   };
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 px-4">
+    <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 px-4">
       {/* Logo Section */}
-      <div className="flex flex-col items-center mb-6">
+         <div className="bg-white rounded-2xl shadow-lg p-8 w-full max-w-md">
+          <div className="flex flex-col items-center mb-6">
         <div className="w-14 h-14 rounded-2xl bg-blue-600 flex items-center justify-center mb-3 shadow-lg">
           <span className="text-white text-2xl font-bold"><FaCalculator /></span>
         </div>
         <h1 className="text-2xl font-bold text-gray-900">
           Project Billing Calculator
         </h1>
-       
-      </div>
+       </div>
+      
 
       {/* Login Card */}
-      <div className="bg-white rounded-2xl shadow-lg p-8 w-full max-w-md">
+   
         <form onSubmit={handleLogin} className="space-y-5">
           {/* Email */}
           <div>
@@ -118,6 +119,11 @@ const LoginPage = () => {
             Sign In
           </button>
         </form>
+        <div className="mt-8 pt-6 border-t text-center">
+            <Link to="/resource-login" className="text-sm border border-gray-500 p-2 bg-slate-50 rounded-md  text-gray-600 hover:text-blue-600">
+              Resource Login →
+            </Link>
+          </div>
       </div>
 
       

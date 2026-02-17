@@ -1,5 +1,9 @@
 // src/components/resourcesDashboard/MRO/MROAllocationPanel.jsx
-// Fixed: Uses date-filtered locations based on assigned_date
+// UPDATED: 
+// - Allows multiple entries per location per day (same Request ID logic)
+// - "Pending" = locations not yet logged for TODAY (not this selected date)
+// - Location dropdown shows ALL assigned locations (with entry count indicator)
+// - Once logged on ANY date, location won't appear as "pending" on future dates
 import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { toast } from 'react-hot-toast';
@@ -10,12 +14,12 @@ const MRO_REQUEST_TYPES = ['New Request', 'Follow up', 'Batch', 'DDS', 'E-link',
 const MRO_REQUESTOR_TYPES = ['NRS-NO Records', 'Manual', 'Other Processing (Canceled/Released By Other)', 'Processed', 'Processed through File Drop'];
 
 const MROAllocationPanel = ({ 
-  locations = [],  // These are now DATE-FILTERED from parent
+  locations = [],  // DATE-FILTERED locations from parent
   selectedDate, 
   resourceInfo, 
   geographyId,
   geographyName,
-  allocations = [],
+  allocations = [],  // Allocations for selectedDate
   onRefresh,
   loading 
 }) => {
@@ -48,7 +52,6 @@ const MROAllocationPanel = ({
   });
 
   // Flatten locations from assignments
-  // These locations are ALREADY filtered by assigned_date from parent component
   const allAssignedLocations = useMemo(() => {
     const locs = [];
     
@@ -58,7 +61,7 @@ const MROAllocationPanel = ({
           subproject_id: sp.subproject_id,
           subproject_name: sp.subproject_name,
           subproject_key: sp.subproject_key,
-          assigned_date: sp.assigned_date, // Track assigned date
+          assigned_date: sp.assigned_date,
           project_id: assignment.project_id,
           project_name: assignment.project_name,
           client_id: assignment.client_id,
@@ -72,8 +75,19 @@ const MROAllocationPanel = ({
     return locs;
   }, [locations]);
 
-  // Filter out locations that already have entries for selected date
+  // ═══════════════════════════════════════════════════════════════
+  // AVAILABLE LOCATIONS: ALL assigned locations (for multiple entries)
+  // Show all locations in dropdown - user can add multiple Request IDs
+  // ═══════════════════════════════════════════════════════════════
   const availableLocations = useMemo(() => {
+    return allAssignedLocations;
+  }, [allAssignedLocations]);
+
+  // ═══════════════════════════════════════════════════════════════
+  // PENDING LOCATIONS: Locations that have NO entries for selected date
+  // These are "pending" because they need at least one entry
+  // ═══════════════════════════════════════════════════════════════
+  const pendingLocations = useMemo(() => {
     const loggedSubprojectIds = new Set(
       allocations.map(a => a.subproject_id?.toString())
     );
@@ -82,6 +96,18 @@ const MROAllocationPanel = ({
       !loggedSubprojectIds.has(loc.subproject_id?.toString())
     );
   }, [allAssignedLocations, allocations]);
+
+  // Get entry count per location for display in dropdown
+  const entriesPerLocation = useMemo(() => {
+    const counts = {};
+    allocations.forEach(a => {
+      const key = a.subproject_id?.toString();
+      if (key) {
+        counts[key] = (counts[key] || 0) + 1;
+      }
+    });
+    return counts;
+  }, [allocations]);
 
   // Check if selected date is valid
   const dateValidation = useMemo(() => {
@@ -93,12 +119,10 @@ const MROAllocationPanel = ({
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     
-    // Cannot log for future dates
     if (selected > today) {
       return { valid: false, message: 'Cannot log entries for future dates' };
     }
     
-    // Check if month is locked
     const lastDayOfMonth = new Date(selected.getFullYear(), selected.getMonth() + 1, 0);
     lastDayOfMonth.setHours(23, 59, 59, 999);
     
@@ -109,9 +133,9 @@ const MROAllocationPanel = ({
     return { valid: true, message: null };
   }, [selectedDate]);
 
-  // Handle location selection
+  // Handle location selection - now searches in ALL locations
   const handleLocationChange = (subprojectId) => {
-    const location = availableLocations.find(l => l.subproject_id === subprojectId);
+    const location = allAssignedLocations.find(l => l.subproject_id === subprojectId);
     setSelectedLocationInfo(location);
     
     setFormData(prev => ({
@@ -169,7 +193,7 @@ const MROAllocationPanel = ({
   // Submit new entry
   const handleSubmit = async () => {
     if (!formData.subproject_id || !formData.request_type || !formData.request_id) {
-      toast.error('Please select Location and Request Type');
+      toast.error('Please fill Location, Request ID, and Request Type');
       return;
     }
     
@@ -204,16 +228,18 @@ const MROAllocationPanel = ({
         geography_name: selectedLocationInfo?.geography_name || geographyName
       }, getAuthHeaders());
       
-      // Reset form
-      setFormData({
-        subproject_id: '',
+      toast.success('Entry submitted successfully!');
+      
+      // Reset form but KEEP the selected location for quick additional entries
+      setFormData(prev => ({
+        ...prev,
         facility_name: '',
         request_id: '',
         request_type: '',
         requestor_type: '',
         processing_time: ''
-      });
-      setSelectedLocationInfo(null);
+        // Keep subproject_id for quick additional entries on same location
+      }));
       setRequestIdWarning(null);
       
       if (onRefresh) onRefresh();
@@ -279,7 +305,7 @@ const MROAllocationPanel = ({
       setShowDeleteModal(null);
       setDeleteReason('');
       if (onRefresh) onRefresh();
-       toast.success('Delete request submitted for admin approval');
+      toast.success('Delete request submitted for admin approval');
     } catch (err) {
       toast.error(err.response?.data?.message || 'Failed to submit delete request');
     }
@@ -298,28 +324,38 @@ const MROAllocationPanel = ({
 
   // Stats
   const stats = useMemo(() => ({
-    pending: availableLocations.length,
+    pending: pendingLocations.length,
     todaysEntries: allocations.length,
-    totalAssigned: allAssignedLocations.length
-  }), [availableLocations, allocations, allAssignedLocations]);
+    totalAssigned: allAssignedLocations.length,
+    locationsLogged: allAssignedLocations.length - pendingLocations.length
+  }), [pendingLocations, allocations, allAssignedLocations]);
 
   return (
     <div className="space-y-4">
       {/* Stats Row */}
       <div className="flex flex-wrap gap-3">
         <div className="px-3 py-1.5 bg-orange-100 text-orange-700 rounded text-xs font-medium">
-          Pending: {stats.pending}
+          Pending Locations: {stats.pending}
         </div>
         <div className="px-3 py-1.5 bg-blue-100 text-blue-700 rounded text-xs font-medium">
           Today's Entries: {stats.todaysEntries}
         </div>
         <div className="px-3 py-1.5 bg-green-100 text-green-700 rounded text-xs font-medium">
-          Total for Date: {stats.todaysEntries}
+          Locations Logged: {stats.locationsLogged}/{stats.totalAssigned}
         </div>
         <div className="px-3 py-1.5 bg-gray-100 text-gray-700 rounded text-xs font-medium">
-          Assigned Locations (for this date): {stats.totalAssigned}
+          Total Assigned: {stats.totalAssigned}
         </div>
       </div>
+
+      {/* Info about multiple entries */}
+      {stats.locationsLogged > 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-blue-700 text-xs">
+          💡 <strong>Tip:</strong> You can add multiple Request IDs per location. 
+          {stats.pending > 0 && ` ${stats.pending} location(s) still need at least one entry.`}
+          {stats.pending === 0 && ' All locations have at least one entry!'}
+        </div>
+      )}
 
       {/* No Locations Warning */}
       {allAssignedLocations.length === 0 && (
@@ -327,7 +363,6 @@ const MROAllocationPanel = ({
           <p className="text-sm font-medium">⚠️ No locations available for this date</p>
           <p className="text-xs mt-1">
             You may not have any locations assigned that are effective on or before {selectedDate}.
-            Locations can only be logged from their assignment date onwards.
           </p>
         </div>
       )}
@@ -346,18 +381,10 @@ const MROAllocationPanel = ({
         </div>
         
         <div className="p-4">
-          {availableLocations.length === 0 && allAssignedLocations.length > 0 ? (
-            <div className="text-center py-4 text-gray-500">
-              <p className="text-sm">✅ All assigned locations have been logged for this date.</p>
-              <p className="text-xs mt-1">Select a different date or wait for new assignments.</p>
-            </div>
-          ) : allAssignedLocations.length === 0 ? (
+          {allAssignedLocations.length === 0 ? (
             <div className="text-center py-4 text-yellow-600">
               <p className="text-sm">⚠️ No locations are assigned to you for this date.</p>
-              <p className="text-xs mt-1">
-                Locations are only available from their assignment date. 
-                Try selecting a more recent date.
-              </p>
+              <p className="text-xs mt-1">Try selecting a more recent date.</p>
             </div>
           ) : !dateValidation.valid ? (
             <div className="text-center py-4 text-red-500">
@@ -380,13 +407,21 @@ const MROAllocationPanel = ({
                 
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Location <span className="text-red-500">*</span></label>
-                  <select value={formData.subproject_id} onChange={(e) => handleLocationChange(e.target.value)} className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-green-500">
+                  <select 
+                    value={formData.subproject_id} 
+                    onChange={(e) => handleLocationChange(e.target.value)} 
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-green-500"
+                  >
                     <option value="">-- Select --</option>
-                    {availableLocations.map(loc => (
-                      <option key={loc.subproject_id} value={loc.subproject_id}>
-                        {loc.subproject_name}
-                      </option>
-                    ))}
+                    {availableLocations.map(loc => {
+                      const entryCount = entriesPerLocation[loc.subproject_id?.toString()] || 0;
+                      const isPending = entryCount === 0;
+                      return (
+                        <option key={loc.subproject_id} value={loc.subproject_id}>
+                          {loc.subproject_name} {entryCount > 0 ? `(${entryCount} entries)` : '⚠️ Pending'}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
                 
@@ -397,18 +432,34 @@ const MROAllocationPanel = ({
                 
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Facility</label>
-                  <input type="text" value={formData.facility_name} onChange={(e) => setFormData(prev => ({ ...prev, facility_name: e.target.value }))} placeholder="Free text" className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-green-500" />
+                  <input 
+                    type="text" 
+                    value={formData.facility_name} 
+                    onChange={(e) => setFormData(prev => ({ ...prev, facility_name: e.target.value }))} 
+                    placeholder="Free text" 
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-green-500" 
+                  />
                 </div>
                 
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Request ID <span className="text-red-500">*</span></label>
-                  <input type="text" value={formData.request_id} onChange={(e) => setFormData(prev => ({ ...prev, request_id: e.target.value }))} placeholder="Enter ID" className={`w-full px-2 py-1.5 text-xs border rounded focus:ring-1 focus:ring-green-500 ${requestIdWarning ? 'border-yellow-400 bg-yellow-50' : 'border-gray-300'}`} />
+                  <input 
+                    type="text" 
+                    value={formData.request_id} 
+                    onChange={(e) => setFormData(prev => ({ ...prev, request_id: e.target.value }))} 
+                    placeholder="Enter ID" 
+                    className={`w-full px-2 py-1.5 text-xs border rounded focus:ring-1 focus:ring-green-500 ${requestIdWarning ? 'border-yellow-400 bg-yellow-50' : 'border-gray-300'}`} 
+                  />
                   {requestIdWarning && <p className="text-[10px] text-yellow-600 mt-0.5">⚠️ Suggest: {requestIdWarning.suggested_type}</p>}
                 </div>
                 
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Request Type <span className="text-red-500">*</span></label>
-                  <select value={formData.request_type} onChange={(e) => setFormData(prev => ({ ...prev, request_type: e.target.value }))} className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-green-500">
+                  <select 
+                    value={formData.request_type} 
+                    onChange={(e) => setFormData(prev => ({ ...prev, request_type: e.target.value }))} 
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-green-500"
+                  >
                     <option value="">-- Select --</option>
                     {MRO_REQUEST_TYPES.map(type => <option key={type} value={type}>{type}</option>)}
                   </select>
@@ -417,7 +468,11 @@ const MROAllocationPanel = ({
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Requestor Type</label>
                   {isProcessingType ? (
-                    <select value={formData.requestor_type} onChange={(e) => setFormData(prev => ({ ...prev, requestor_type: e.target.value }))} className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-green-500">
+                    <select 
+                      value={formData.requestor_type} 
+                      onChange={(e) => setFormData(prev => ({ ...prev, requestor_type: e.target.value }))} 
+                      className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-green-500"
+                    >
                       <option value="">-- Select --</option>
                       {MRO_REQUESTOR_TYPES.map(type => <option key={type} value={type}>{type}</option>)}
                     </select>
@@ -431,12 +486,41 @@ const MROAllocationPanel = ({
               <div className="flex items-end gap-3">
                 <div className="w-32">
                   <label className="block text-xs font-medium text-gray-600 mb-1">Proc. Time</label>
-                  <input type="text" value={formData.processing_time} onChange={(e) => setFormData(prev => ({ ...prev, processing_time: e.target.value }))} placeholder="Optional" className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-green-500" />
+                  <input 
+                    type="text" 
+                    value={formData.processing_time} 
+                    onChange={(e) => setFormData(prev => ({ ...prev, processing_time: e.target.value }))} 
+                    placeholder="Optional" 
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-green-500" 
+                  />
                 </div>
                 
-                <button onClick={handleSubmit} disabled={submitting || !formData.subproject_id || !formData.request_type || !dateValidation.valid} className="px-4 py-1.5 bg-green-600 text-white text-xs font-medium rounded hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed">
+                <button 
+                  onClick={handleSubmit} 
+                  disabled={submitting || !formData.subproject_id || !formData.request_type || !formData.request_id || !dateValidation.valid} 
+                  className="px-4 py-1.5 bg-green-600 text-white text-xs font-medium rounded hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                >
                   {submitting ? 'Submitting...' : 'Submit Entry'}
                 </button>
+                
+                {formData.subproject_id && (
+                  <button 
+                    onClick={() => {
+                      setFormData({
+                        subproject_id: '',
+                        facility_name: '',
+                        request_id: '',
+                        request_type: '',
+                        requestor_type: '',
+                        processing_time: ''
+                      });
+                      setSelectedLocationInfo(null);
+                    }}
+                    className="px-3 py-1.5 bg-gray-200 text-gray-700 text-xs font-medium rounded hover:bg-gray-300"
+                  >
+                    Clear
+                  </button>
+                )}
               </div>
             </>
           )}
@@ -485,10 +569,14 @@ const MROAllocationPanel = ({
                           </span>
                         </td>
                         <td className="px-1 py-1 border-r">
-                          {isEditing ? <input type="text" value={editData.facility_name} onChange={(e) => setEditData(prev => ({ ...prev, facility_name: e.target.value }))} className="w-full px-1 py-0.5 text-xs border border-yellow-400 rounded" /> : (alloc.facility_name || '-')}
+                          {isEditing ? (
+                            <input type="text" value={editData.facility_name} onChange={(e) => setEditData(prev => ({ ...prev, facility_name: e.target.value }))} className="w-full px-1 py-0.5 text-xs border border-yellow-400 rounded" />
+                          ) : (alloc.facility_name || '-')}
                         </td>
                         <td className="px-1 py-1 border-r">
-                          {isEditing ? <input type="text" value={editData.request_id} onChange={(e) => setEditData(prev => ({ ...prev, request_id: e.target.value }))} className="w-full px-1 py-0.5 text-xs border border-yellow-400 rounded" /> : (alloc.request_id || '-')}
+                          {isEditing ? (
+                            <input type="text" value={editData.request_id} onChange={(e) => setEditData(prev => ({ ...prev, request_id: e.target.value }))} className="w-full px-1 py-0.5 text-xs border border-yellow-400 rounded" />
+                          ) : (alloc.request_id || '-')}
                         </td>
                         <td className="px-1 py-1 border-r">
                           {isEditing ? (
@@ -498,29 +586,29 @@ const MROAllocationPanel = ({
                           ) : alloc.request_type}
                         </td>
                         <td className="px-1 py-1 border-r">
-                          {alloc.process_type !== 'Processing' ? <span className="text-gray-400">N/A</span> : 
-                            isEditing ? (
-                              <select value={editData.requestor_type} onChange={(e) => setEditData(prev => ({ ...prev, requestor_type: e.target.value }))} className="w-full px-1 py-0.5 text-xs border border-yellow-400 rounded">
-                                <option value="">--</option>
-                                {MRO_REQUESTOR_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                              </select>
-                            ) : (alloc.requestor_type || '-')
-                          }
+                          {alloc.process_type !== 'Processing' ? (
+                            <span className="text-gray-400">N/A</span>
+                          ) : isEditing ? (
+                            <select value={editData.requestor_type} onChange={(e) => setEditData(prev => ({ ...prev, requestor_type: e.target.value }))} className="w-full px-1 py-0.5 text-xs border border-yellow-400 rounded">
+                              <option value="">--</option>
+                              {MRO_REQUESTOR_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                          ) : (alloc.requestor_type || '-')}
                         </td>
                         <td className="px-2 py-1.5 text-center">
-                          {locked ? <span className="text-gray-400 text-[10px]">🔒 Locked</span> : 
-                            isEditing ? (
-                              <div className="flex gap-1 justify-center">
-                                <button onClick={saveEdit} className="px-1.5 py-0.5 text-[10px] bg-green-500 text-white rounded hover:bg-green-600">Save</button>
-                                <button onClick={cancelEdit} className="px-1.5 py-0.5 text-[10px] bg-gray-400 text-white rounded hover:bg-gray-500">Cancel</button>
-                              </div>
-                            ) : (
-                              <div className="flex gap-1 justify-center">
-                                <button onClick={() => startEdit(alloc)} className="px-1.5 py-0.5 text-[10px] bg-blue-500 text-white rounded hover:bg-blue-600">Edit</button>
-                                <button onClick={() => setShowDeleteModal(alloc._id)} disabled={alloc.has_pending_delete_request} className="px-1.5 py-0.5 text-[10px] bg-red-500 text-white rounded hover:bg-red-600 disabled:bg-red-300">Del</button>
-                              </div>
-                            )
-                          }
+                          {locked ? (
+                            <span className="text-gray-400 text-[10px]">🔒 Locked</span>
+                          ) : isEditing ? (
+                            <div className="flex gap-1 justify-center">
+                              <button onClick={saveEdit} className="px-1.5 py-0.5 text-[10px] bg-green-500 text-white rounded hover:bg-green-600">Save</button>
+                              <button onClick={cancelEdit} className="px-1.5 py-0.5 text-[10px] bg-gray-400 text-white rounded hover:bg-gray-500">Cancel</button>
+                            </div>
+                          ) : (
+                            <div className="flex gap-1 justify-center">
+                              <button onClick={() => startEdit(alloc)} className="px-1.5 py-0.5 text-[10px] bg-blue-500 text-white rounded hover:bg-blue-600">Edit</button>
+                              <button onClick={() => setShowDeleteModal(alloc._id)} disabled={alloc.has_pending_delete_request} className="px-1.5 py-0.5 text-[10px] bg-red-500 text-white rounded hover:bg-red-600 disabled:bg-red-300">Del</button>
+                            </div>
+                          )}
                         </td>
                       </tr>
                       
@@ -551,7 +639,13 @@ const MROAllocationPanel = ({
           <div className="bg-white rounded-lg shadow-xl w-96 p-4">
             <h3 className="text-sm font-semibold text-gray-800 mb-3">Request Deletion</h3>
             <p className="text-xs text-gray-600 mb-3">Your delete request will be sent to an admin for approval.</p>
-            <textarea value={deleteReason} onChange={(e) => setDeleteReason(e.target.value)} className="w-full px-3 py-2 text-xs border border-gray-300 rounded" rows={3} placeholder="Enter delete reason (required)" />
+            <textarea 
+              value={deleteReason} 
+              onChange={(e) => setDeleteReason(e.target.value)} 
+              className="w-full px-3 py-2 text-xs border border-gray-300 rounded" 
+              rows={3} 
+              placeholder="Enter delete reason (required)" 
+            />
             <div className="flex justify-end gap-2 mt-4">
               <button onClick={() => { setShowDeleteModal(null); setDeleteReason(''); }} className="px-3 py-1.5 text-xs bg-gray-200 text-gray-700 rounded hover:bg-gray-300">Cancel</button>
               <button onClick={submitDeleteRequest} disabled={!deleteReason.trim()} className="px-3 py-1.5 text-xs bg-red-500 text-white rounded hover:bg-red-600 disabled:bg-red-300">Submit Request</button>

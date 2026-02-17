@@ -211,8 +211,16 @@ router.get('/me', authenticateResource, async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════
 // GET: Locations for a specific client and date
-// CRITICAL: Only returns locations assigned ON or BEFORE the target date
+// 
+// CRITICAL LOGIC:
+// 1. Only returns locations assigned ON or BEFORE the target date
+// 2. If a location was logged on ANY previous date, it will NOT appear
+//    for dates AFTER the first log (prevents duplicate pending)
+// 3. For the SAME date as first log, location remains available for 
+//    multiple entries (handled by frontend)
+// ═══════════════════════════════════════════════════════════════
 router.get('/locations', authenticateResource, async (req, res) => {
   try {
     const { client, date } = req.query;
@@ -237,7 +245,45 @@ router.get('/locations', authenticateResource, async (req, res) => {
       });
     }
     
-    // Get locations assigned on or before the target date
+    // ═══════════════════════════════════════════════════════════════
+    // STEP 1: Find locations that have been logged BEFORE the target date
+    // These should be EXCLUDED (they're "completed" for previous days)
+    // ═══════════════════════════════════════════════════════════════
+    let loggedLocationIds = new Set();
+    
+    // Import allocation models dynamically to avoid circular dependencies
+    const MRODailyAllocation = require('../models/Allocations/MROdailyallocation');
+    const VerismaDailyAllocation = require('../models/Allocations/Verismadailyallocation');
+    // const DatavantDailyAllocation = require('../models/Allocations/Datavantdailyallocation');
+    
+    // Get the appropriate allocation model
+    let AllocationModel = null;
+    if (client.toLowerCase() === 'mro') {
+      AllocationModel = MRODailyAllocation;
+    } else if (client.toLowerCase() === 'verisma') {
+      AllocationModel = VerismaDailyAllocation;
+    }
+    // Add Datavant when available:
+    // else if (client.toLowerCase() === 'datavant') {
+    //   AllocationModel = DatavantDailyAllocation;
+    // }
+    
+    if (AllocationModel) {
+      // Find all locations logged on ANY date BEFORE targetDate
+      const previousLogs = await AllocationModel.find({
+        resource_email: resource.email.toLowerCase(),
+        allocation_date: { $lt: targetDate },
+        is_deleted: { $ne: true }
+      }).distinct('subproject_id');
+      
+      previousLogs.forEach(id => {
+        if (id) loggedLocationIds.add(id.toString());
+      });
+    }
+    
+    // ═══════════════════════════════════════════════════════════════
+    // STEP 2: Build filtered locations list
+    // ═══════════════════════════════════════════════════════════════
     const locations = [];
     
     for (const assignment of resource.assignments) {
@@ -250,29 +296,35 @@ router.get('/locations', authenticateResource, async (req, res) => {
       for (const sp of assignment.subprojects || []) {
         if (sp.status && sp.status !== 'active') continue;
         
-        // If no assigned_date, assume it was assigned before we tracked dates - allow access
-        if (!sp.assigned_date) {
-          filteredSubprojects.push({
-            subproject_id: sp.subproject_id,
-            subproject_name: sp.subproject_name,
-            subproject_key: sp.subproject_key,
-            assigned_date: null
-          });
-          continue;
+        const subprojectIdStr = sp.subproject_id?.toString();
+        
+        // ═══════════════════════════════════════════════════════════
+        // CHECK 1: If location was logged on a PREVIOUS date, exclude it
+        // This prevents it from appearing as "pending" on future dates
+        // ═══════════════════════════════════════════════════════════
+        if (loggedLocationIds.has(subprojectIdStr)) {
+          continue; // Skip - already logged on a previous date
         }
         
-        const assignedDate = new Date(sp.assigned_date);
-        assignedDate.setHours(0, 0, 0, 0);
-        
-        // CRITICAL: Only include if assigned_date <= targetDate
-        if (assignedDate <= targetDate) {
-          filteredSubprojects.push({
-            subproject_id: sp.subproject_id,
-            subproject_name: sp.subproject_name,
-            subproject_key: sp.subproject_key,
-            assigned_date: sp.assigned_date
-          });
+        // ═══════════════════════════════════════════════════════════
+        // CHECK 2: assigned_date must be ON or BEFORE target date
+        // ═══════════════════════════════════════════════════════════
+        if (sp.assigned_date) {
+          const assignedDate = new Date(sp.assigned_date);
+          assignedDate.setHours(0, 0, 0, 0);
+          
+          if (assignedDate > targetDate) {
+            continue; // Location not yet assigned for this date
+          }
         }
+        // If no assigned_date, assume it was assigned before tracking - allow access
+        
+        filteredSubprojects.push({
+          subproject_id: sp.subproject_id,
+          subproject_name: sp.subproject_name,
+          subproject_key: sp.subproject_key,
+          assigned_date: sp.assigned_date || null
+        });
       }
       
       if (filteredSubprojects.length > 0) {
@@ -292,6 +344,7 @@ router.get('/locations', authenticateResource, async (req, res) => {
       success: true,
       target_date: targetDate.toISOString().split('T')[0],
       count: locations.reduce((sum, l) => sum + l.subprojects.length, 0),
+      excluded_previously_logged: loggedLocationIds.size,
       locations
     });
     
@@ -431,45 +484,85 @@ router.post('/session-refresh', authenticateResource, async (req, res) => {
 // ADMIN ROUTES FOR RESOURCE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════
 
-// GET: All resources (Admin)
+// ═══════════════════════════════════════════════════════════════
+// ADMIN ROUTES FOR RESOURCE MANAGEMENT (FIXED PAGINATION)
+// ═══════════════════════════════════════════════════════════════
+
+// GET: All resources (Admin) - FIXED PAGINATION
+
 router.get('/', authenticateUser, async (req, res) => {
   try {
-    const { status, client, search, page = 1, limit = 100 } = req.query;
+    // ✅ FIXED: Extract geography and project filters
+    const { status, geography, client, project, search, page = 1, limit = 10 } = req.query;
+    
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.max(1, Math.min(100, parseInt(limit) || 10));
     
     const query = {};
     
     if (status) query.status = status;
-    if (search) {
+    
+    // ✅ FIXED: Add geography filter (by ID, exact match)
+    if (geography && geography.trim()) {
+      query['assignments.geography_id'] = geography;
+    }
+    
+    // ✅ FIXED: Change from client_name to client_id (exact match)
+    if (client && client.trim()) {
+      query['assignments.client_id'] = client;
+    }
+    
+    // ✅ FIXED: Add project filter (by ID, exact match)
+    if (project && project.trim()) {
+      query['assignments.project_id'] = project;
+    }
+    
+    // ✅ FIXED: Search only applies to name/email
+    if (search && search.trim()) {
       query.$or = [
         { name: { $regex: search, $options: 'i' } },
         { email: { $regex: search, $options: 'i' } }
       ];
     }
-    if (client) {
-      query['assignments.client_name'] = { $regex: client, $options: 'i' };
-    }
     
-    const total = await Resource.countDocuments(query);
+    // Get counts and calculate pages
+    const totalCount = await Resource.countDocuments(query);
+    const totalPages = Math.ceil(totalCount / limitNum);
+    const validPage = Math.min(pageNum, Math.max(1, totalPages));
+    
+    // Fetch resources with pagination
     const resources = await Resource.find(query)
       .select('-otp -otp_expires -current_session_token')
       .sort({ name: 1 })
-      .skip((parseInt(page) - 1) * parseInt(limit))
-      .limit(parseInt(limit))
+      .skip((validPage - 1) * limitNum)
+      .limit(limitNum)
       .lean();
     
+    // Calculate indices for display
+    const startIndex = totalCount === 0 ? 0 : (validPage - 1) * limitNum + 1;
+    const endIndex = Math.min(validPage * limitNum, totalCount);
+    
+    // ✅ Return proper pagination structure
     res.json({
       success: true,
-      total,
-      page: parseInt(page),
-      pages: Math.ceil(total / parseInt(limit)),
-      resources
+      resources,
+      pagination: {
+        total: totalCount,
+        page: validPage,
+        limit: limitNum,
+        pages: totalPages,
+        hasNextPage: validPage < totalPages,
+        hasPrevPage: validPage > 1,
+        startIndex,
+        endIndex
+      }
     });
     
   } catch (error) {
+    console.error('Get resources error:', error);
     res.status(500).json({ message: error.message });
   }
 });
-
 // ═══════════════════════════════════════════════════════════════
 // POST: Create resource (Admin) 
 // UPDATED: If resource already exists, don't error - proceed to assign locations
@@ -613,7 +706,32 @@ router.get('/login-activity/:id', authenticateUser, async (req, res) => {
     res.status(500).json({ message: 'Error fetching resource activity', error: error.message });
   }
 });
-
+// DELETE: Remove resource (Admin)
+router.delete('/:id', authenticateUser, async (req, res) => {
+  try {
+    const resourceId = req.params.id;
+    
+    if (!require('mongoose').Types.ObjectId.isValid(resourceId)) {
+      return res.status(400).json({ message: 'Invalid resource ID' });
+    }
+    
+    const resource = await Resource.findByIdAndDelete(resourceId);
+    
+    if (!resource) {
+      return res.status(404).json({ message: 'Resource not found' });
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'Resource deleted successfully',
+      resource 
+    });
+    
+  } catch (error) {
+    console.error('Delete resource error:', error);
+    res.status(500).json({ message: 'Error deleting resource', error: error.message });
+  }
+});
 // GET: Single resource by ID (Admin)
 router.get('/:id', authenticateUser, async (req, res) => {
   try {

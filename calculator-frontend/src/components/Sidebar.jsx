@@ -21,6 +21,7 @@ const navItems = [
   { name: "Costing", icon: CurrencyDollarIcon, path: "/costing" },
   { name: "Invoices", icon: Cog6ToothIcon, path: "/invoices" },
   { name: "Resource Cases", icon: UsersIcon, path: "/admin-resource-cases" },
+  {name: "Delete Requests", icon: FolderIcon, path: "/admin-delete-requests"},
    { name: "Master Database", icon: FiDatabase, path: "/masterdatabase" },
   { name: "Settings", icon: CiSettings, path: "/settings" },
 ];
