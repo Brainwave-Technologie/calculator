@@ -16,13 +16,16 @@ const navItems = [
   // { name: "Analysis", icon: CalculatorIcon, path: "/" },
   { name: "Dashboard", icon: ChartBarIcon, path: "/" },
   { name: "Projects", icon: FolderIcon, path: "/projects" },
+  { name: "Monthly Payroll", icon: CurrencyDollarIcon, path: "/payout-dashboard" },
+  {name: "Processing Payout", icon: CurrencyDollarIcon, path: "/processing-payout"},
   { name: "Resources", icon: UsersIcon, path: "/resources" },
   { name: "Productivity", icon: FaChartBar, path: "/productivity" },
   { name: "Costing", icon: CurrencyDollarIcon, path: "/costing" },
-  { name: "Invoices", icon: Cog6ToothIcon, path: "/invoices" },
+  // { name: "Invoices", icon: Cog6ToothIcon, path: "/invoices" },
+  { name: "Payout Calculator", icon: CalculatorIcon, path: "/payout/calculator" },
   { name: "Resource Cases", icon: UsersIcon, path: "/admin-resource-cases" },
   {name: "Delete Requests", icon: FolderIcon, path: "/admin-delete-requests"},
-   { name: "Master Database", icon: FiDatabase, path: "/masterdatabase" },
+  { name: "Master Database", icon: FiDatabase, path: "/masterdatabase" },
   { name: "Settings", icon: CiSettings, path: "/settings" },
 ];
 

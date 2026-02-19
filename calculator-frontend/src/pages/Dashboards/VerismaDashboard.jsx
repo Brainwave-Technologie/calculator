@@ -1,194 +1,38 @@
 // pages/dashboards/VerismaDashboard.jsx - VERISMA CLIENT DASHBOARD
-// Updated to fetch from resource-logged daily allocations
-// FIXED: PST timezone, resource dropdown, month-wise billing filters
+// Clean UI, Fixed filters, Process type dropdown, Integrated detailed entries
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { toast } from 'react-hot-toast';
 
 const apiBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000/api';
 
-// =============================================
-// HELPER COMPONENTS
-// =============================================
-
-const Loader = ({ message = "Loading..." }) => (
-  <div className="flex flex-col items-center py-10">
-    <div className="w-8 h-8 border-3 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-    <p className="mt-3 text-sm text-gray-500">{message}</p>
-  </div>
-);
-
-// Async Searchable Select Component
-const AsyncSelect = ({ 
-  value, 
-  onChange, 
-  fetchOptions, 
-  placeholder = "Search...",
-  disabled = false,
-  labelKey = "name",
-  valueKey = "_id"
-}) => {
-  const [isOpen, setIsOpen] = useState(false);
-  const [search, setSearch] = useState('');
-  const [options, setOptions] = useState([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [selectedLabel, setSelectedLabel] = useState('');
-  const containerRef = useRef(null);
-  const debounceRef = useRef(null);
-
-  useEffect(() => {
-    const handleClickOutside = (e) => {
-      if (containerRef.current && !containerRef.current.contains(e.target)) {
-        setIsOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  useEffect(() => {
-    if (!isOpen || disabled) return;
-
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-
-    debounceRef.current = setTimeout(async () => {
-      setIsLoading(true);
-      try {
-        const results = await fetchOptions(search);
-        setOptions(results || []);
-      } catch (error) {
-        console.error('Error fetching options:', error);
-        setOptions([]);
-      } finally {
-        setIsLoading(false);
-      }
-    }, 300);
-
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
-  }, [search, isOpen, fetchOptions, disabled]);
-
-  useEffect(() => {
-    if (!value) {
-      setSelectedLabel('');
-      return;
-    }
-    const found = options.find(opt => opt[valueKey] === value);
-    if (found) setSelectedLabel(found[labelKey]);
-  }, [value, options, labelKey, valueKey]);
-
-  const handleSelect = (option) => {
-    onChange(option[valueKey]);
-    setSelectedLabel(option[labelKey]);
-    setIsOpen(false);
-    setSearch('');
+const RequestTypeBadge = ({ type }) => {
+  if (!type) return <span className="text-gray-400 text-xs">—</span>;
+  const colors = {
+    'New Request': 'bg-blue-100 text-blue-700',
+    'Key': 'bg-purple-100 text-purple-700',
+    'Duplicate': 'bg-orange-100 text-orange-700'
   };
-
-  const handleClear = (e) => {
-    e.stopPropagation();
-    onChange('');
-    setSelectedLabel('');
-    setSearch('');
-  };
-
-  return (
-    <div ref={containerRef} className="relative">
-      <div
-        onClick={() => !disabled && setIsOpen(!isOpen)}
-        className={`w-full px-3 py-2 border rounded-lg flex items-center justify-between cursor-pointer min-h-[42px] ${
-          disabled ? 'bg-gray-100 cursor-not-allowed' : 'bg-white hover:border-blue-400'
-        }`}
-        title={selectedLabel}
-      >
-        <span className={`flex-1 truncate ${selectedLabel ? 'text-gray-900' : 'text-gray-400'}`}>
-          {selectedLabel || placeholder}
-        </span>
-        <div className="flex items-center space-x-1 flex-shrink-0 ml-2">
-          {value && !disabled && (
-            <button onClick={handleClear} className="text-gray-400 hover:text-red-500 p-1">✕</button>
-          )}
-          <span className="text-gray-400">{isOpen ? '▲' : '▼'}</span>
-        </div>
-      </div>
-
-      {isOpen && !disabled && (
-        <div className="absolute z-50 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-60 overflow-hidden">
-          <div className="p-2 border-b sticky top-0 bg-white">
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Type to search..."
-              className="w-full px-3 py-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
-              autoFocus
-            />
-          </div>
-          <div className="max-h-48 overflow-y-auto">
-            {isLoading ? (
-              <div className="p-3 text-center text-gray-500">Loading...</div>
-            ) : options.length === 0 ? (
-              <div className="p-3 text-center text-gray-500">
-                {search ? 'No results found' : 'Start typing to search'}
-              </div>
-            ) : (
-              options.map((option) => (
-                <div
-                  key={option[valueKey]}
-                  onClick={() => handleSelect(option)}
-                  className={`px-3 py-2 cursor-pointer hover:bg-blue-50 ${
-                    option[valueKey] === value ? 'bg-blue-100 text-blue-700' : ''
-                  }`}
-                  title={option[labelKey]}
-                >
-                  <div className="truncate">{option[labelKey]}</div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
+  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${colors[type] || 'bg-gray-100 text-gray-700'}`}>{type}</span>;
 };
-
-// =============================================
-// PST TIMEZONE HELPER
-// =============================================
-const getPSTDate = () => {
-  const now = new Date();
-  // PST is UTC-8 (or PDT UTC-7 during daylight saving)
-  // Using -8 for standard PST
-  const pstOffset = -8 * 60; // PST offset in minutes
-  const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
-  return new Date(utcTime + (pstOffset * 60000));
-};
-
-const formatDateForAPI = (date) => {
-  if (!date) return null;
-  const d = new Date(date);
-  return d.toISOString().split('T')[0];
-};
-
-// =============================================
-// VERISMA DASHBOARD COMPONENT
-// =============================================
 
 const VerismaDashboard = () => {
-  // State declarations
-  const [geographiesData, setGeographiesData] = useState([]);
-  const [resources, setResources] = useState([]);
-  const [allResources, setAllResources] = useState([]); // Store all resources for filtering
+  // State
+  const [geographies, setGeographies] = useState([]);
+  const [allResources, setAllResources] = useState([]);
+  const [verismaResources, setVerismaResources] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [subprojects, setSubprojects] = useState([]);
+  
   const [filters, setFilters] = useState({
     geography: '',
     resource_id: '',
-    resource_email: '', // Added for proper filtering
+    resource_email: '',
+    project_id: '', // Process type filter
     subproject_id: '',
     request_type: '',
-    month: (new Date().getMonth() + 1).toString(), // Default to current month
-    year: new Date().getFullYear().toString(),
-    startDate: '',
-    endDate: ''
+    month: (new Date().getMonth() + 1).toString(),
+    year: new Date().getFullYear().toString()
   });
   const [searchTerm, setSearchTerm] = useState('');
   
@@ -196,247 +40,234 @@ const VerismaDashboard = () => {
   const [allocations, setAllocations] = useState([]);
   const [summaryData, setSummaryData] = useState([]);
   const [totals, setTotals] = useState(null);
-  const [grandTotals, setGrandTotals] = useState(null);
+  
+  // Detailed entries
+  const [showDetailed, setShowDetailed] = useState(true);
+  const [detailedSearch, setDetailedSearch] = useState('');
+  const [detailedPage, setDetailedPage] = useState(1);
+  const detailedLimit = 25;
   
   const [isLoading, setIsLoading] = useState(false);
   const [sortConfig, setSortConfig] = useState({ key: 'location', direction: 'asc' });
-  const [pagination, setPagination] = useState({
-    currentPage: 1,
-    totalPages: 1,
-    totalItems: 0,
-    itemsPerPage: 100
-  });
 
-  // Helpers
-  const formatCurrency = (amount) => 
-    new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(amount || 0);
+  const formatCurrency = (amt) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(amt || 0);
+  const formatNumber = (num) => new Intl.NumberFormat('en-US').format(num || 0);
+  const formatDate = (date) => date ? new Date(date).toLocaleDateString('en-US', { month: 'short', day: '2-digit' }) : '—';
+  const getAuthToken = () => localStorage.getItem('token') || sessionStorage.getItem('token');
 
-  const formatNumber = (num) => 
-    new Intl.NumberFormat('en-US').format(num || 0);
-
-  const formatDate = (dateString) => {
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  };
-
-  // Get auth token
-  const getAuthToken = () => {
-    return localStorage.getItem('token') || sessionStorage.getItem('token');
-  };
-
-  // Fetch geographies on mount
+  // Fetch geographies
   useEffect(() => {
-    const fetchGeographies = async () => {
+    const fetchGeo = async () => {
       try {
-        const response = await fetch(`${apiBaseUrl}/geography`);
-        const data = await response.json();
-        setGeographiesData(Array.isArray(data) ? data : data.geographies || []);
-      } catch (error) {
-        console.error("Error fetching geographies:", error);
-      }
+        const res = await fetch(`${apiBaseUrl}/geography`);
+        const data = await res.json();
+        setGeographies(Array.isArray(data) ? data : data.geographies || data.data || []);
+      } catch (e) { console.error(e); }
     };
-    fetchGeographies();
+    fetchGeo();
   }, []);
 
-  // Fetch resources for filter dropdown - FIXED
+  // Fetch ALL resources (handle pagination) and filter for Verisma - FIXED
   useEffect(() => {
-    const fetchResources = async () => {
+    const fetchAllResources = async () => {
       try {
         const token = getAuthToken();
-        const response = await fetch(`${apiBaseUrl}/resource`, {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
-          }
-        });
+        let allResourcesList = [];
+        let page = 1;
+        let hasMore = true;
         
-        if (!response.ok) {
-          throw new Error('Failed to fetch resources');
+        // Fetch all pages of resources
+        while (hasMore) {
+          const res = await fetch(`${apiBaseUrl}/resource?page=${page}&limit=100`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          const data = await res.json();
+          
+          const pageResources = data.resources || data.data || data || [];
+          allResourcesList = [...allResourcesList, ...pageResources];
+          
+          // Check if there are more pages
+          if (data.pagination) {
+            hasMore = data.pagination.hasMore || page < data.pagination.totalPages;
+          } else if (data.pages) {
+            hasMore = page < data.pages;
+          } else {
+            hasMore = false;
+          }
+          page++;
+          
+          // Safety limit
+          if (page > 20) break;
         }
         
-        const data = await response.json();
-        const resourceList = data.resources || data || [];
+        setAllResources(allResourcesList);
         
-        // Store all resources
-        setAllResources(resourceList);
-        
-        // Filter to only Verisma-assigned resources
-        // Check both assignments array and direct client assignments
-        const verismaResources = resourceList.filter(r => {
+        // Filter Verisma resources - check all possible assignment structures
+        const verisma = allResourcesList.filter(r => {
           // Check assignments array
-          if (r.assignments && Array.isArray(r.assignments)) {
+          if (r.assignments?.length > 0) {
             return r.assignments.some(a => 
               a.client_name?.toLowerCase() === 'verisma' ||
               a.client?.name?.toLowerCase() === 'verisma'
             );
           }
-          // Check direct client_name field
-          if (r.client_name?.toLowerCase() === 'verisma') {
-            return true;
-          }
-          // Check allocated_clients array
-          if (r.allocated_clients && Array.isArray(r.allocated_clients)) {
+          // Check allocated_clients
+          if (r.allocated_clients?.length > 0) {
             return r.allocated_clients.some(c => 
               c.client_name?.toLowerCase() === 'verisma' ||
               c.name?.toLowerCase() === 'verisma'
             );
           }
-          return false;
+          // Check direct client_name
+          return r.client_name?.toLowerCase() === 'verisma';
         });
         
-        // If no Verisma-specific resources found, show all resources
-        // This handles cases where assignment filtering doesn't work
-        if (verismaResources.length === 0) {
-          console.log('No Verisma-specific resources found, showing all resources');
-          setResources(resourceList);
-        } else {
-          setResources(verismaResources);
-        }
-        
-      } catch (error) {
-        console.error('Error fetching resources:', error);
-        toast.error('Failed to load resources');
+        // If no Verisma resources found, show all (fallback)
+        setVerismaResources(verisma.length > 0 ? verisma : allResourcesList);
+      } catch (e) { 
+        console.error('Resource fetch error:', e);
+        setVerismaResources([]);
       }
     };
-    fetchResources();
+    fetchAllResources();
   }, []);
 
-  // Build date range from filters - FIXED for month-wise billing
-  const getDateRange = useCallback(() => {
-    // Priority 1: Use explicit date range if provided
-    if (filters.startDate && filters.endDate) {
-      return {
-        start_date: filters.startDate,
-        end_date: filters.endDate
-      };
-    }
-    
-    // Priority 2: Use month/year filters
-    const year = parseInt(filters.year);
-    
-    if (filters.month && filters.month !== 'all') {
-      const month = parseInt(filters.month);
-      // Create date in local timezone to avoid off-by-one errors
-      const startDate = new Date(year, month - 1, 1);
-      const endDate = new Date(year, month, 0); // Last day of month
-      
-      return {
-        start_date: `${year}-${String(month).padStart(2, '0')}-01`,
-        end_date: `${year}-${String(month).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`
-      };
-    }
-    
-    // Priority 3: Full year
-    return {
-      start_date: `${year}-01-01`,
-      end_date: `${year}-12-31`
+  // Fetch projects (Process Types) and subprojects for Verisma - FIXED API path
+  useEffect(() => {
+    const fetchProjectsAndSubprojects = async () => {
+      try {
+        const token = getAuthToken();
+        // First get Verisma client
+        const clientRes = await fetch(`${apiBaseUrl}/client?search=Verisma`);
+        const clients = await clientRes.json();
+        const verismaClient = (Array.isArray(clients) ? clients : clients.data || []).find(c => c.name.toLowerCase() === 'verisma');
+        
+        if (verismaClient) {
+          // Get projects for this client - use correct endpoint
+          const projRes = await fetch(`${apiBaseUrl}/project/client/${verismaClient._id}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          const projData = await projRes.json();
+          const projectList = projData.projects || projData || [];
+          setProjects(projectList);
+          
+          // Fetch subprojects for each project
+          let allSubprojects = [];
+          for (const project of projectList) {
+            try {
+              const spRes = await fetch(`${apiBaseUrl}/project/${project._id}/subproject`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+              });
+              const spData = await spRes.json();
+              const sps = spData.data || spData || [];
+              allSubprojects = [...allSubprojects, ...sps];
+            } catch (e) {
+              console.log('Error fetching subprojects for project:', project._id);
+            }
+          }
+          
+          setSubprojects(allSubprojects);
+        }
+      } catch (e) { console.error('Projects/Subprojects fetch error:', e); }
     };
-  }, [filters.startDate, filters.endDate, filters.month, filters.year]);
+    fetchProjectsAndSubprojects();
+  }, []);
 
-  // Fetch all allocations from the new admin endpoint - FIXED
-  const fetchAllocations = useCallback(async (page = 1) => {
+  // Get date range
+  const getDateRange = useCallback(() => {
+    const year = parseInt(filters.year);
+    const month = parseInt(filters.month);
+    const startDate = new Date(year, month - 1, 1);
+    const endDate = new Date(year, month, 0);
+    return {
+      start_date: `${year}-${String(month).padStart(2, '0')}-01`,
+      end_date: `${year}-${String(month).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`
+    };
+  }, [filters.month, filters.year]);
+
+  // Fetch allocations
+  const fetchAllocations = useCallback(async () => {
     setIsLoading(true);
-    
     try {
       const token = getAuthToken();
       const dateRange = getDateRange();
       
-      console.log('Fetching with date range:', dateRange);
-      console.log('Filters:', filters);
-      
       const params = new URLSearchParams({
         start_date: dateRange.start_date,
         end_date: dateRange.end_date,
-        page: page.toString(),
-        limit: '500' // Increased limit for better data aggregation
+        limit: '500'
       });
 
-      // FIXED: Use resource_email instead of resource_id for filtering
-      if (filters.resource_email) {
-        params.append('resource_email', filters.resource_email);
-      } else if (filters.resource_id) {
-        // Find the resource email from the selected resource_id
-        const selectedResource = allResources.find(r => r._id === filters.resource_id);
-        if (selectedResource?.email) {
-          params.append('resource_email', selectedResource.email);
-        }
-      }
-      
+      if (filters.resource_email) params.append('resource_email', filters.resource_email);
       if (filters.subproject_id) params.append('subproject_id', filters.subproject_id);
       if (filters.request_type) params.append('request_type', filters.request_type);
 
-      console.log('API params:', params.toString());
-
-      const response = await fetch(`${apiBaseUrl}/verisma-daily-allocations/admin/all?${params}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        }
+      const res = await fetch(`${apiBaseUrl}/verisma-daily-allocations/admin/all?${params}`, {
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || 'Failed to fetch allocations');
-      }
-
-      const data = await response.json();
-      console.log('API Response:', data);
-      
+      if (!res.ok) throw new Error('Failed to fetch');
+      const data = await res.json();
       setAllocations(data.allocations || []);
-      setPagination({
-        currentPage: data.page || 1,
-        totalPages: data.pages || 1,
-        totalItems: data.total || 0,
-        itemsPerPage: 500
-      });
-
-      // Process allocations into summary format
-      processAllocationsIntoSummary(data.allocations || []);
-
-    } catch (error) {
-      console.error("Error loading allocations:", error);
-      toast.error(error.message || 'Failed to load allocation data');
+      processIntoSummary(data.allocations || []);
+    } catch (e) {
+      console.error(e);
+      toast.error('Failed to load data');
       setAllocations([]);
       setSummaryData([]);
-      setTotals(null);
-      setGrandTotals(null);
     } finally {
       setIsLoading(false);
     }
-  }, [filters, getDateRange, allResources]);
+  }, [filters, getDateRange]);
 
-  // Process raw allocations into location-based summary - FIXED
-  const processAllocationsIntoSummary = useCallback((allocs) => {
+  // Process into summary
+  const processIntoSummary = useCallback((allocs) => {
     if (!allocs || allocs.length === 0) {
       setSummaryData([]);
       setTotals(null);
-      setGrandTotals(null);
       return;
+    }
+
+    // Apply filters
+    let filtered = allocs;
+    
+    // Geography filter
+    if (filters.geography) {
+      const geo = geographies.find(g => g._id === filters.geography);
+      if (geo) {
+        filtered = filtered.filter(a => a.geography_name?.toLowerCase() === geo.name?.toLowerCase());
+      }
+    }
+    
+    // Process type (project) filter
+    if (filters.project_id) {
+      const proj = projects.find(p => p._id === filters.project_id);
+      if (proj) {
+        filtered = filtered.filter(a => 
+          a.project_id === filters.project_id || 
+          a.project_name?.toLowerCase() === proj.name?.toLowerCase()
+        );
+      }
     }
 
     // Group by location + project
     const locationMap = new Map();
     
-    allocs.forEach(alloc => {
+    filtered.forEach(alloc => {
       const key = `${alloc.subproject_id || alloc.subproject_name}-${alloc.project_id || alloc.project_name}`;
       
       if (!locationMap.has(key)) {
         locationMap.set(key, {
-          location: alloc.subproject_name || 'Unknown Location',
+          location: alloc.subproject_name || 'Unknown',
           subproject_id: alloc.subproject_id,
-          processType: alloc.project_name || alloc.process || 'Unknown Process',
+          processType: alloc.project_name || 'Unknown',
           project_id: alloc.project_id,
           geography_name: alloc.geography_name || '',
-          geographyType: alloc.geography_type || 
-            (alloc.geography_name?.toLowerCase().includes('us') ? 'onshore' : 'offshore'),
-          duplicateHours: 0,
-          duplicateTotal: 0,
-          keyHours: 0,
-          keyTotal: 0,
-          newRequestHours: 0,
-          newRequestTotal: 0,
-          totalCasesHours: 0,
-          totalBilling: 0
+          geographyType: alloc.geography_name?.toLowerCase().includes('us') ? 'onshore' : 'offshore',
+          duplicateCases: 0, duplicateTotal: 0,
+          keyCases: 0, keyTotal: 0,
+          newRequestCases: 0, newRequestTotal: 0,
+          totalCases: 0, totalBilling: 0
         });
       }
       
@@ -445,714 +276,386 @@ const VerismaDashboard = () => {
       const amount = parseFloat(alloc.billing_amount) || 0;
       
       if (alloc.request_type === 'Duplicate') {
-        entry.duplicateHours += count;
+        entry.duplicateCases += count;
         entry.duplicateTotal += amount;
       } else if (alloc.request_type === 'Key') {
-        entry.keyHours += count;
+        entry.keyCases += count;
         entry.keyTotal += amount;
       } else if (alloc.request_type === 'New Request') {
-        entry.newRequestHours += count;
+        entry.newRequestCases += count;
         entry.newRequestTotal += amount;
       }
       
-      entry.totalCasesHours = entry.duplicateHours + entry.keyHours + entry.newRequestHours;
+      entry.totalCases = entry.duplicateCases + entry.keyCases + entry.newRequestCases;
       entry.totalBilling = entry.duplicateTotal + entry.keyTotal + entry.newRequestTotal;
     });
 
-    let summaryArray = Array.from(locationMap.values());
+    let summary = Array.from(locationMap.values());
     
-    // Apply search filter
+    // Search filter
     if (searchTerm) {
-      const searchLower = searchTerm.toLowerCase();
-      summaryArray = summaryArray.filter(row => 
-        row.location?.toLowerCase().includes(searchLower) ||
-        row.processType?.toLowerCase().includes(searchLower)
-      );
+      const s = searchTerm.toLowerCase();
+      summary = summary.filter(r => r.location?.toLowerCase().includes(s) || r.processType?.toLowerCase().includes(s));
     }
 
-    // Apply geography filter
-    if (filters.geography) {
-      const geo = geographiesData.find(g => g._id === filters.geography);
-      if (geo) {
-        summaryArray = summaryArray.filter(row => 
-          row.geography_name?.toLowerCase() === geo.name?.toLowerCase()
-        );
-      }
-    }
-
-    setSummaryData(summaryArray);
+    setSummaryData(summary);
 
     // Calculate totals
-    const calculatedTotals = summaryArray.reduce((acc, row) => ({
-      duplicateHours: acc.duplicateHours + (row.duplicateHours || 0),
-      duplicateTotal: acc.duplicateTotal + (row.duplicateTotal || 0),
-      keyHours: acc.keyHours + (row.keyHours || 0),
-      keyTotal: acc.keyTotal + (row.keyTotal || 0),
-      newRequestHours: acc.newRequestHours + (row.newRequestHours || 0),
-      newRequestTotal: acc.newRequestTotal + (row.newRequestTotal || 0),
-      totalCasesHours: acc.totalCasesHours + (row.totalCasesHours || 0),
-      totalBilling: acc.totalBilling + (row.totalBilling || 0)
+    const calculatedTotals = summary.reduce((acc, r) => ({
+      duplicateCases: acc.duplicateCases + r.duplicateCases,
+      duplicateTotal: acc.duplicateTotal + r.duplicateTotal,
+      keyCases: acc.keyCases + r.keyCases,
+      keyTotal: acc.keyTotal + r.keyTotal,
+      newRequestCases: acc.newRequestCases + r.newRequestCases,
+      newRequestTotal: acc.newRequestTotal + r.newRequestTotal,
+      totalCases: acc.totalCases + r.totalCases,
+      totalBilling: acc.totalBilling + r.totalBilling
     }), {
-      duplicateHours: 0, duplicateTotal: 0,
-      keyHours: 0, keyTotal: 0,
-      newRequestHours: 0, newRequestTotal: 0,
-      totalCasesHours: 0, totalBilling: 0
+      duplicateCases: 0, duplicateTotal: 0,
+      keyCases: 0, keyTotal: 0,
+      newRequestCases: 0, newRequestTotal: 0,
+      totalCases: 0, totalBilling: 0
     });
 
     setTotals(calculatedTotals);
-    setGrandTotals(calculatedTotals);
-  }, [searchTerm, filters.geography, geographiesData]);
+  }, [searchTerm, filters.geography, filters.project_id, geographies, projects]);
 
-  // Fetch data when filters change
+  // Re-process when client-side filters change
   useEffect(() => {
-    const timer = setTimeout(() => {
-      fetchAllocations(1);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [filters.month, filters.year, filters.resource_id, filters.resource_email, 
-      filters.geography, filters.request_type, filters.startDate, filters.endDate]);
+    if (allocations.length > 0) processIntoSummary(allocations);
+  }, [searchTerm, filters.geography, filters.project_id, processIntoSummary]);
 
-  // Re-process when search term changes (no need to refetch)
+  // Fetch when server-side filters change
   useEffect(() => {
-    if (allocations.length > 0) {
-      processAllocationsIntoSummary(allocations);
-    }
-  }, [searchTerm, processAllocationsIntoSummary, allocations]);
+    const t = setTimeout(() => fetchAllocations(), 300);
+    return () => clearTimeout(t);
+  }, [filters.month, filters.year, filters.resource_email, filters.subproject_id, filters.request_type, fetchAllocations]);
 
-  // Handle filter changes - FIXED
   const handleFilterChange = (e) => {
     const { id, value } = e.target;
-    
-    // Special handling for resource_id to also set resource_email
     if (id === 'resource_id') {
-      const selectedResource = allResources.find(r => r._id === value);
-      setFilters(prev => ({ 
-        ...prev, 
-        resource_id: value,
-        resource_email: selectedResource?.email || ''
-      }));
+      const r = allResources.find(res => res._id === value);
+      setFilters(prev => ({ ...prev, resource_id: value, resource_email: r?.email || '' }));
     } else {
       setFilters(prev => ({ ...prev, [id]: value }));
     }
   };
 
-  // Clear all filters
-  const clearFilters = () => {
-    setFilters({
-      geography: '',
-      resource_id: '',
-      resource_email: '',
-      subproject_id: '',
-      request_type: '',
-      month: (new Date().getMonth() + 1).toString(),
-      year: new Date().getFullYear().toString(),
-      startDate: '',
-      endDate: ''
-    });
-    setSearchTerm('');
-  };
-
-  // Sorting
   const handleSort = (key) => {
-    setSortConfig(prev => ({
-      key,
-      direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
-    }));
+    setSortConfig(prev => ({ key, direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc' }));
   };
 
-  const sortedData = [...summaryData].sort((a, b) => {
-    const aVal = a[sortConfig.key];
-    const bVal = b[sortConfig.key];
-    
-    if (aVal === undefined || aVal === null) return 1;
-    if (bVal === undefined || bVal === null) return -1;
-    
-    if (typeof aVal === 'string') {
-      return sortConfig.direction === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+  const sortedData = useMemo(() => {
+    return [...summaryData].sort((a, b) => {
+      const aVal = a[sortConfig.key];
+      const bVal = b[sortConfig.key];
+      if (typeof aVal === 'string') return sortConfig.direction === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      return sortConfig.direction === 'asc' ? (aVal || 0) - (bVal || 0) : (bVal || 0) - (aVal || 0);
+    });
+  }, [summaryData, sortConfig]);
+
+  // Filtered detailed entries
+  const filteredDetailed = useMemo(() => {
+    if (!detailedSearch) return allocations;
+    const s = detailedSearch.toLowerCase();
+    return allocations.filter(a => 
+      a.resource_name?.toLowerCase().includes(s) || 
+      a.subproject_name?.toLowerCase().includes(s) ||
+      a.request_type?.toLowerCase().includes(s)
+    );
+  }, [allocations, detailedSearch]);
+
+  // Paginated detailed entries
+  const paginatedDetailed = useMemo(() => {
+    const start = (detailedPage - 1) * detailedLimit;
+    return filteredDetailed.slice(start, start + detailedLimit);
+  }, [filteredDetailed, detailedPage]);
+
+  const detailedTotalPages = Math.ceil(filteredDetailed.length / detailedLimit);
+
+  const exportCSV = () => {
+    if (sortedData.length === 0) { toast.error('No data'); return; }
+    const headers = ['Sr', 'Location', 'Process Type', 'Duplicate', 'Dup Total', 'Key', 'Key Total', 'New Request', 'NR Total', 'Total Cases', 'Total Billing', 'Geo'];
+    const rows = sortedData.map((r, i) => [
+      i + 1, r.location, r.processType,
+      r.duplicateCases, r.duplicateTotal.toFixed(2),
+      r.keyCases, r.keyTotal.toFixed(2),
+      r.newRequestCases, r.newRequestTotal.toFixed(2),
+      r.totalCases, r.totalBilling.toFixed(2),
+      r.geographyType === 'onshore' ? 'US' : 'IND'
+    ]);
+    if (totals) {
+      rows.push(['', 'TOTAL', '', totals.duplicateCases, totals.duplicateTotal.toFixed(2), totals.keyCases, totals.keyTotal.toFixed(2), totals.newRequestCases, totals.newRequestTotal.toFixed(2), totals.totalCases, totals.totalBilling.toFixed(2), '']);
     }
-    return sortConfig.direction === 'asc' ? aVal - bVal : bVal - aVal;
-  });
-
-  // Export to CSV
-  const exportToCSV = async () => {
-    const loadingToast = toast.loading('Preparing export...');
-    
-    try {
-      if (summaryData.length === 0) {
-        toast.dismiss(loadingToast);
-        toast.error('No data to export');
-        return;
-      }
-
-      const headers = [
-        'Sr No', 'Locations', 'Process Type', 
-        'Duplicate', 'Total (Duplicate)', 
-        'Key', 'Total (Key)', 
-        'New Request', 'Total (New Request)',
-        'Total Cases/Hours', 'Total Billing', 'Geography'
-      ];
-
-      const rows = sortedData.map((row, idx) => [
-        idx + 1,
-        row.location || '',
-        row.processType || '',
-        row.duplicateHours || 0,
-        (row.duplicateTotal || 0).toFixed(2),
-        row.keyHours || 0,
-        (row.keyTotal || 0).toFixed(2),
-        row.newRequestHours || 0,
-        (row.newRequestTotal || 0).toFixed(2),
-        row.totalCasesHours || 0,
-        (row.totalBilling || 0).toFixed(2),
-        row.geographyType === 'onshore' ? 'US' : 'IND'
-      ]);
-
-      if (totals) {
-        rows.push([
-          '', 'TOTALS', '',
-          totals.duplicateHours || 0,
-          (totals.duplicateTotal || 0).toFixed(2),
-          totals.keyHours || 0,
-          (totals.keyTotal || 0).toFixed(2),
-          totals.newRequestHours || 0,
-          (totals.newRequestTotal || 0).toFixed(2),
-          totals.totalCasesHours || 0,
-          (totals.totalBilling || 0).toFixed(2),
-          ''
-        ]);
-      }
-
-      const escapeCSV = (val) => {
-        if (val === null || val === undefined) return '';
-        const str = String(val);
-        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-          return `"${str.replace(/"/g, '""')}"`;
-        }
-        return str;
-      };
-
-      const csvContent = [
-        headers.map(escapeCSV).join(','),
-        ...rows.map(row => row.map(escapeCSV).join(','))
-      ].join('\n');
-
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      
-      const dateRange = filters.startDate && filters.endDate 
-        ? `${filters.startDate}-to-${filters.endDate}`
-        : `${filters.year}-${filters.month !== 'all' ? filters.month.padStart(2, '0') : 'all'}`;
-      
-      a.download = `verisma-billing-${dateRange}-${sortedData.length}-records.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
-      
-      toast.dismiss(loadingToast);
-      toast.success(`Successfully exported ${sortedData.length} records!`);
-
-    } catch (error) {
-      console.error('Export error:', error);
-      toast.dismiss(loadingToast);
-      toast.error(error.message || 'Failed to export data.');
-    }
+    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `verisma-billing-${filters.month}-${filters.year}.csv`;
+    a.click();
+    toast.success('Exported!');
   };
 
-  // Get current month name for display
-  const getMonthName = (monthNum) => {
-    if (monthNum === 'all') return 'All Months';
-    const date = new Date(2000, parseInt(monthNum) - 1, 1);
-    return date.toLocaleString('default', { month: 'long' });
-  };
-
-  // Column definitions
-  const columns = [
-    { key: 'srNo', header: 'Sr No', sortable: false, className: 'w-16' },
-    { key: 'location', header: 'Locations', sortable: true, className: 'min-w-[180px]' },
-    { key: 'processType', header: 'Process Type', sortable: true, className: 'min-w-[150px]' },
-    { key: 'duplicateHours', header: 'Duplicate', sortable: true, className: 'w-24 text-right', isNumber: true },
-    { key: 'duplicateTotal', header: 'Total', sortable: true, className: 'w-28 text-right', isCurrency: true },
-    { key: 'keyHours', header: 'Key', sortable: true, className: 'w-24 text-right', isNumber: true },
-    { key: 'keyTotal', header: 'Total', sortable: true, className: 'w-28 text-right', isCurrency: true },
-    { key: 'newRequestHours', header: 'New Request', sortable: true, className: 'w-28 text-right', isNumber: true },
-    { key: 'newRequestTotal', header: 'Total', sortable: true, className: 'w-32 text-right', isCurrency: true },
-    { key: 'totalCasesHours', header: 'Total Cases/Hours', sortable: true, className: 'w-36 text-right', isNumber: true },
-    { key: 'totalBilling', header: 'Total Billing', sortable: true, className: 'w-36 text-right', isCurrency: true },
-    { key: 'geography', header: 'Geography', sortable: true, className: 'w-24 text-center' }
-  ];
+  const SortIcon = ({ col }) => (
+    <span className="text-gray-400 ml-0.5 text-[10px]">
+      {sortConfig.key === col ? (sortConfig.direction === 'asc' ? '▲' : '▼') : '◆'}
+    </span>
+  );
 
   return (
-    <div className="p-4 space-y-4">
-      {/* Header Info Banner */}
-      <div className="bg-blue-50 border-l-4 border-blue-500 p-4 rounded-lg shadow-sm">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="text-sm font-semibold text-blue-900">
-              Verisma Resource Daily Allocations
-            </div>
-            <div className="text-sm text-blue-700">
-              Viewing data logged by resources via daily allocation entry
-              <span className="ml-2 text-xs text-blue-500">(Timezone: PST)</span>
-            </div>
-          </div>
-          <div className="text-right">
-            <div className="text-xs text-blue-600">
-              Total Records: {formatNumber(pagination.totalItems || allocations.length)}
-            </div>
-            <div className="text-xs text-blue-500">
-              Period: {getMonthName(filters.month)} {filters.year}
-            </div>
-          </div>
+    <div className="bg-gray-50 min-h-screen">
+      {/* Header */}
+      <div className="bg-blue-700 text-white px-4 py-2.5 flex items-center justify-between">
+        <div>
+          <h1 className="text-base font-semibold">Verisma Billing Dashboard</h1>
+          <p className="text-xs text-blue-200">{new Date(parseInt(filters.year), parseInt(filters.month) - 1).toLocaleString('default', { month: 'long', year: 'numeric' })}</p>
+        </div>
+        <div className="flex items-center gap-4 text-xs">
+          <div><span className="text-blue-200">Locations:</span> <span className="font-semibold">{sortedData.length}</span></div>
+          <div><span className="text-blue-200">Cases:</span> <span className="font-semibold">{formatNumber(totals?.totalCases)}</span></div>
+          <div><span className="text-blue-200">Billing:</span> <span className="font-semibold">{formatCurrency(totals?.totalBilling)}</span></div>
         </div>
       </div>
 
       {/* Filters */}
-      <div className="bg-white rounded-xl shadow-md p-4">
-        {/* Filters Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-4">
-          {/* Geography Filter */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Geography</label>
-            <select
-              id="geography"
-              value={filters.geography}
-              onChange={handleFilterChange}
-              className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 min-h-[42px]"
-            >
-              <option value="">All Geographies</option>
-              {geographiesData.map(g => (
-                <option key={g._id} value={g._id}>{g.name}</option>
-              ))}
-            </select>
-          </div>
+      <div className="bg-white border-b px-4 py-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Process Type (Project) Filter */}
+          <select id="project_id" value={filters.project_id} onChange={handleFilterChange}
+            className="px-2 py-1.5 text-xs border rounded min-w-[120px]">
+            <option value="">All Process Types</option>
+            {projects.map(p => <option key={p._id} value={p._id}>{p.name}</option>)}
+          </select>
 
-          {/* Resource Filter - FIXED */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Resource {resources.length > 0 && <span className="text-xs text-gray-400">({resources.length})</span>}
-            </label>
-            <select
-              id="resource_id"
-              value={filters.resource_id}
-              onChange={handleFilterChange}
-              className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 min-h-[42px]"
-            >
-              <option value="">All Resources</option>
-              {resources.map(r => (
-                <option key={r._id} value={r._id}>
-                  {r.name} {r.email ? `(${r.email})` : ''}
-                </option>
-              ))}
-            </select>
-          </div>
+          {/* Geography */}
+          <select id="geography" value={filters.geography} onChange={handleFilterChange}
+            className="px-2 py-1.5 text-xs border rounded">
+            <option value="">All Geo</option>
+            {geographies.map(g => <option key={g._id} value={g._id}>{g.name}</option>)}
+          </select>
 
-          {/* Request Type Filter */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Request Type</label>
-            <select
-              id="request_type"
-              value={filters.request_type}
-              onChange={handleFilterChange}
-              className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 min-h-[42px]"
-            >
-              <option value="">All Types</option>
-              <option value="New Request">New Request</option>
-              <option value="Key">Key</option>
-              <option value="Duplicate">Duplicate</option>
-            </select>
-          </div>
+          {/* Resource - FIXED to show all */}
+          <select id="resource_id" value={filters.resource_id} onChange={handleFilterChange}
+            className="px-2 py-1.5 text-xs border rounded min-w-[150px]">
+            <option value="">All Resources ({verismaResources.length})</option>
+            {verismaResources.map(r => (
+              <option key={r._id} value={r._id}>{r.name}</option>
+            ))}
+          </select>
 
-          {/* Month Filter - FIXED */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Month</label>
-            <select
-              id="month"
-              value={filters.month}
-              onChange={handleFilterChange}
-              className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 min-h-[42px]"
-            >
-              <option value="all">All Months</option>
-              {Array.from({ length: 12 }, (_, i) => (
-                <option key={i + 1} value={(i + 1).toString()}>
-                  {new Date(0, i).toLocaleString('default', { month: 'long' })}
-                </option>
-              ))}
-            </select>
-          </div>
+          {/* Location */}
+          <select id="subproject_id" value={filters.subproject_id} onChange={handleFilterChange}
+            className="px-2 py-1.5 text-xs border rounded min-w-[120px]">
+            <option value="">All Locations</option>
+            {subprojects.map(sp => <option key={sp._id} value={sp._id}>{sp.name}</option>)}
+          </select>
 
-          {/* Year Filter */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Year</label>
-            <select
-              id="year"
-              value={filters.year}
-              onChange={handleFilterChange}
-              className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 min-h-[42px]"
-            >
-              <option value="2027">2027</option>
-              <option value="2026">2026</option>
-              <option value="2025">2025</option>
-              <option value="2024">2024</option>
-            </select>
-          </div>
+          {/* Request Type */}
+          <select id="request_type" value={filters.request_type} onChange={handleFilterChange}
+            className="px-2 py-1.5 text-xs border rounded">
+            <option value="">All Types</option>
+            <option value="New Request">New Request</option>
+            <option value="Key">Key</option>
+            <option value="Duplicate">Duplicate</option>
+          </select>
 
-          {/* Start Date Filter */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
-            <input
-              type="date"
-              id="startDate"
-              value={filters.startDate}
-              onChange={handleFilterChange}
-              className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 min-h-[42px]"
-            />
-          </div>
-
-          {/* End Date Filter */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
-            <input
-              type="date"
-              id="endDate"
-              value={filters.endDate}
-              onChange={handleFilterChange}
-              className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 min-h-[42px]"
-            />
-          </div>
+          {/* Month/Year */}
+          <select id="month" value={filters.month} onChange={handleFilterChange}
+            className="px-2 py-1.5 text-xs border rounded">
+            {Array.from({ length: 12 }, (_, i) => (
+              <option key={i + 1} value={i + 1}>{new Date(0, i).toLocaleString('default', { month: 'short' })}</option>
+            ))}
+          </select>
+          <select id="year" value={filters.year} onChange={handleFilterChange}
+            className="px-2 py-1.5 text-xs border rounded">
+            {[2027, 2026, 2025, 2024].map(y => <option key={y} value={y}>{y}</option>)}
+          </select>
 
           {/* Search */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Search</label>
-            <input
-              type="text"
-              placeholder="Search locations..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none min-h-[42px]"
-            />
+          <input type="text" placeholder="Search..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
+            className="px-2 py-1.5 text-xs border rounded w-24" />
+
+          <div className="ml-auto flex items-center gap-2">
+            <button onClick={fetchAllocations} disabled={isLoading}
+              className="px-2.5 py-1.5 text-xs bg-gray-100 hover:bg-gray-200 rounded">↻</button>
+            <button onClick={exportCSV} className="px-3 py-1.5 text-xs bg-blue-600 text-white hover:bg-blue-700 rounded">↓ Export</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="p-3 space-y-3">
+        {/* Summary Table */}
+        <div className="bg-white rounded-lg shadow-sm overflow-hidden">
+          <div className="px-3 py-2 border-b bg-gray-50 flex items-center justify-between">
+            <span className="text-xs font-semibold text-gray-700">📊 Location Summary</span>
+            <span className="text-xs text-gray-500">{sortedData.length} locations</span>
+          </div>
+          <div className="overflow-auto" style={{ maxHeight: '38vh' }}>
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 z-10 bg-slate-100">
+                <tr>
+                  <th colSpan={3} className="border-b border-slate-200"></th>
+                  <th colSpan={2} className="py-1.5 px-1 text-center text-[10px] font-bold uppercase bg-orange-100 text-orange-700 border-l border-b">Duplicate</th>
+                  <th colSpan={2} className="py-1.5 px-1 text-center text-[10px] font-bold uppercase bg-purple-100 text-purple-700 border-l border-b">Key</th>
+                  <th colSpan={2} className="py-1.5 px-1 text-center text-[10px] font-bold uppercase bg-blue-100 text-blue-700 border-l border-b">New Request</th>
+                  <th colSpan={2} className="py-1.5 px-1 text-center text-[10px] font-bold uppercase bg-green-100 text-green-700 border-l border-b">Totals</th>
+                  <th className="border-b border-slate-200"></th>
+                </tr>
+                <tr>
+                  <th className="py-2 px-2 text-left font-semibold w-8 border-b">Sr</th>
+                  <th onClick={() => handleSort('location')} className="py-2 px-2 text-left font-semibold min-w-[140px] cursor-pointer hover:bg-slate-200 border-b">Location <SortIcon col="location" /></th>
+                  <th onClick={() => handleSort('processType')} className="py-2 px-2 text-left font-semibold min-w-[100px] cursor-pointer hover:bg-slate-200 border-b">Process <SortIcon col="processType" /></th>
+                  <th onClick={() => handleSort('duplicateCases')} className="py-2 px-1 text-right font-semibold w-12 cursor-pointer bg-orange-50 border-l border-b">Cases</th>
+                  <th className="py-2 px-1 text-right font-semibold w-16 bg-orange-50 border-b">Total</th>
+                  <th onClick={() => handleSort('keyCases')} className="py-2 px-1 text-right font-semibold w-12 cursor-pointer bg-purple-50 border-l border-b">Cases</th>
+                  <th className="py-2 px-1 text-right font-semibold w-16 bg-purple-50 border-b">Total</th>
+                  <th onClick={() => handleSort('newRequestCases')} className="py-2 px-1 text-right font-semibold w-12 cursor-pointer bg-blue-50 border-l border-b">Cases</th>
+                  <th className="py-2 px-1 text-right font-semibold w-16 bg-blue-50 border-b">Total</th>
+                  <th onClick={() => handleSort('totalCases')} className="py-2 px-1 text-right font-semibold w-14 cursor-pointer bg-green-50 border-l border-b">Cases</th>
+                  <th onClick={() => handleSort('totalBilling')} className="py-2 px-1 text-right font-semibold w-18 cursor-pointer bg-green-50 border-b">Billing</th>
+                  <th className="py-2 px-2 text-center font-semibold w-10 border-b">Geo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {isLoading ? (
+                  <tr><td colSpan={12} className="py-8 text-center text-gray-500">Loading...</td></tr>
+                ) : sortedData.length === 0 ? (
+                  <tr><td colSpan={12} className="py-8 text-center text-gray-500">No data found</td></tr>
+                ) : (
+                  <>
+                    {sortedData.map((r, idx) => (
+                      <tr key={`${r.subproject_id}-${r.project_id}-${idx}`} className="border-b border-slate-100 hover:bg-slate-50">
+                        <td className="py-1.5 px-2 text-slate-500">{idx + 1}</td>
+                        <td className="py-1.5 px-2 font-medium text-slate-800 truncate max-w-[160px]" title={r.location}>{r.location}</td>
+                        <td className="py-1.5 px-2 text-slate-600 truncate max-w-[100px]" title={r.processType}>{r.processType}</td>
+                        <td className={`py-1.5 px-1 text-right border-l ${r.duplicateCases > 0 ? 'bg-orange-50 font-medium' : 'text-slate-300'}`}>{r.duplicateCases}</td>
+                        <td className={`py-1.5 px-1 text-right ${r.duplicateCases > 0 ? 'bg-orange-50 text-orange-700 font-medium' : 'text-slate-300'}`}>{r.duplicateCases > 0 ? formatCurrency(r.duplicateTotal) : '$0'}</td>
+                        <td className={`py-1.5 px-1 text-right border-l ${r.keyCases > 0 ? 'bg-purple-50 font-medium' : 'text-slate-300'}`}>{r.keyCases}</td>
+                        <td className={`py-1.5 px-1 text-right ${r.keyCases > 0 ? 'bg-purple-50 text-purple-700 font-medium' : 'text-slate-300'}`}>{r.keyCases > 0 ? formatCurrency(r.keyTotal) : '$0'}</td>
+                        <td className={`py-1.5 px-1 text-right border-l ${r.newRequestCases > 0 ? 'bg-blue-50 font-medium' : 'text-slate-300'}`}>{r.newRequestCases}</td>
+                        <td className={`py-1.5 px-1 text-right ${r.newRequestCases > 0 ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-300'}`}>{r.newRequestCases > 0 ? formatCurrency(r.newRequestTotal) : '$0'}</td>
+                        <td className="py-1.5 px-1 text-right font-bold text-slate-800 border-l bg-green-50/50">{r.totalCases}</td>
+                        <td className="py-1.5 px-1 text-right font-bold text-green-700 bg-green-50/50">{formatCurrency(r.totalBilling)}</td>
+                        <td className="py-1.5 px-2 text-center">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${r.geographyType === 'onshore' ? 'bg-blue-100 text-blue-700' : 'bg-green-100 text-green-700'}`}>
+                            {r.geographyType === 'onshore' ? 'US' : 'IND'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                    {totals && (
+                      <tr className="bg-slate-800 text-white font-semibold sticky bottom-0">
+                        <td className="py-2 px-2"></td>
+                        <td className="py-2 px-2" colSpan={2}>Grand Total</td>
+                        <td className="py-2 px-1 text-right border-l border-slate-600">{totals.duplicateCases}</td>
+                        <td className="py-2 px-1 text-right">{formatCurrency(totals.duplicateTotal)}</td>
+                        <td className="py-2 px-1 text-right border-l border-slate-600">{totals.keyCases}</td>
+                        <td className="py-2 px-1 text-right">{formatCurrency(totals.keyTotal)}</td>
+                        <td className="py-2 px-1 text-right border-l border-slate-600">{totals.newRequestCases}</td>
+                        <td className="py-2 px-1 text-right">{formatCurrency(totals.newRequestTotal)}</td>
+                        <td className="py-2 px-1 text-right border-l border-slate-600 bg-green-600">{totals.totalCases}</td>
+                        <td className="py-2 px-1 text-right bg-green-600">{formatCurrency(totals.totalBilling)}</td>
+                        <td className="py-2 px-2"></td>
+                      </tr>
+                    )}
+                  </>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
 
-        {/* Active Filters Display */}
-        {(filters.startDate || filters.endDate || filters.resource_id || filters.geography || filters.request_type) && (
-          <div className="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-            <div className="flex items-center justify-between">
-              <div className="flex flex-wrap items-center gap-2 text-sm">
-                <span className="font-semibold text-yellow-800">Active Filters:</span>
-                {filters.resource_id && (
-                  <span className="px-2 py-1 bg-yellow-100 rounded text-yellow-800">
-                    Resource: {resources.find(r => r._id === filters.resource_id)?.name || 'Selected'}
-                  </span>
-                )}
-                {filters.geography && (
-                  <span className="px-2 py-1 bg-yellow-100 rounded text-yellow-800">
-                    Geography: {geographiesData.find(g => g._id === filters.geography)?.name || 'Selected'}
-                  </span>
-                )}
-                {filters.request_type && (
-                  <span className="px-2 py-1 bg-yellow-100 rounded text-yellow-800">
-                    Type: {filters.request_type}
-                  </span>
-                )}
-                {(filters.startDate || filters.endDate) && (
-                  <span className="px-2 py-1 bg-yellow-100 rounded text-yellow-800">
-                    📅 {filters.startDate || 'Start'} to {filters.endDate || 'End'}
-                  </span>
-                )}
-              </div>
-              <button
-                onClick={clearFilters}
-                className="text-red-600 hover:text-red-800 font-medium text-sm"
-              >
-                Clear All Filters
-              </button>
+        {/* Summary Cards */}
+        {totals && totals.totalCases > 0 && (
+          <div className="grid grid-cols-4 gap-3">
+            <div className="bg-white rounded-lg shadow-sm p-3 border-l-4 border-orange-500">
+              <div className="text-[10px] text-gray-500 uppercase">Duplicate</div>
+              <div className="text-lg font-bold text-slate-800">{formatNumber(totals.duplicateCases)}</div>
+              <div className="text-xs font-semibold text-orange-600">{formatCurrency(totals.duplicateTotal)}</div>
+            </div>
+            <div className="bg-white rounded-lg shadow-sm p-3 border-l-4 border-purple-500">
+              <div className="text-[10px] text-gray-500 uppercase">Key</div>
+              <div className="text-lg font-bold text-slate-800">{formatNumber(totals.keyCases)}</div>
+              <div className="text-xs font-semibold text-purple-600">{formatCurrency(totals.keyTotal)}</div>
+            </div>
+            <div className="bg-white rounded-lg shadow-sm p-3 border-l-4 border-blue-500">
+              <div className="text-[10px] text-gray-500 uppercase">New Request</div>
+              <div className="text-lg font-bold text-slate-800">{formatNumber(totals.newRequestCases)}</div>
+              <div className="text-xs font-semibold text-blue-600">{formatCurrency(totals.newRequestTotal)}</div>
+            </div>
+            <div className="bg-white rounded-lg shadow-sm p-3 border-l-4 border-green-500">
+              <div className="text-[10px] text-gray-500 uppercase">Grand Total</div>
+              <div className="text-lg font-bold text-slate-800">{formatNumber(totals.totalCases)}</div>
+              <div className="text-xs font-semibold text-green-600">{formatCurrency(totals.totalBilling)}</div>
             </div>
           </div>
         )}
 
-        {/* Action Bar */}
-        <div className="flex justify-between items-center mt-4 pt-4 border-t">
-          <div className="text-sm text-gray-600">
-            Showing <span className="font-semibold">{sortedData.length}</span> location summaries 
-            from <span className="font-semibold">{allocations.length}</span> entries
+        {/* Detailed Entries */}
+        <div className="bg-white rounded-lg shadow-sm overflow-hidden">
+          <div className="px-3 py-2 border-b bg-gray-50 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <button onClick={() => setShowDetailed(!showDetailed)} className="text-gray-500 hover:text-gray-700">{showDetailed ? '▼' : '▶'}</button>
+              <span className="text-xs font-semibold text-gray-700">📋 Detailed Entries • {formatNumber(filteredDetailed.length)} records</span>
+            </div>
+            <input type="text" placeholder="Search entries..." value={detailedSearch} onChange={(e) => { setDetailedSearch(e.target.value); setDetailedPage(1); }}
+              className="px-2 py-1 text-xs border rounded w-36" />
           </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => fetchAllocations(1)}
-              disabled={isLoading}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center space-x-2"
-            >
-              <span className="font-semibold text-sm">{isLoading ? 'Loading...' : 'Refresh'}</span>
-            </button>
-            <button
-              onClick={exportToCSV}
-              disabled={sortedData.length === 0 || isLoading}
-              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center space-x-2"
-            >
-              <span className="font-semibold text-sm">Export CSV</span>
-            </button>
-          </div>
-        </div>
-      </div>
 
-      {/* Data Table */}
-      <div className="bg-white rounded-xl shadow-md overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr className="bg-gray-100 border-b">
-                <th colSpan={3} className="py-2 px-3 text-left text-xs font-bold text-gray-600 uppercase"></th>
-                <th colSpan={2} className="py-2 px-3 text-center text-xs font-bold text-orange-600 uppercase bg-orange-50 border-l">
-                  Duplicate
-                </th>
-                <th colSpan={2} className="py-2 px-3 text-center text-xs font-bold text-purple-600 uppercase bg-purple-50 border-l">
-                  Key
-                </th>
-                <th colSpan={2} className="py-2 px-3 text-center text-xs font-bold text-blue-600 uppercase bg-blue-50 border-l">
-                  New Request
-                </th>
-                <th colSpan={2} className="py-2 px-3 text-center text-xs font-bold text-green-600 uppercase bg-green-50 border-l">
-                  Totals
-                </th>
-                <th className="py-2 px-3 text-center text-xs font-bold text-gray-600 uppercase border-l"></th>
-              </tr>
-              <tr className="bg-gray-50 border-b">
-                {columns.map((col) => (
-                  <th
-                    key={col.key}
-                    onClick={() => col.sortable && handleSort(col.key)}
-                    className={`py-3 px-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider ${col.className || ''} ${col.sortable ? 'cursor-pointer hover:bg-gray-100' : ''}`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span>{col.header}</span>
-                      {col.sortable && (
-                        <span className="text-gray-400 ml-1">
-                          {sortConfig.key === col.key 
-                            ? (sortConfig.direction === 'asc' ? '↑' : '↓') 
-                            : '↕'}
-                        </span>
-                      )}
-                    </div>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {isLoading ? (
-                <tr>
-                  <td colSpan={columns.length}>
-                    <Loader message="Loading allocation data..." />
-                  </td>
-                </tr>
-              ) : sortedData.length === 0 ? (
-                <tr>
-                  <td colSpan={columns.length} className="py-10 text-center">
-                    <div className="text-gray-500">
-                      <div className="text-4xl mb-2">📊</div>
-                      <p className="font-medium">No data found</p>
-                      <p className="text-sm">
-                        {allocations.length === 0 
-                          ? `No allocations logged for ${getMonthName(filters.month)} ${filters.year}`
-                          : 'Try adjusting your search or filters'}
-                      </p>
-                    </div>
-                  </td>
-                </tr>
-              ) : (
-                <>
-                  {sortedData.map((row, idx) => (
-                    <tr 
-                      key={`${row.subproject_id}-${row.project_id}-${idx}`} 
-                      className="hover:bg-gray-50 transition-colors"
-                    >
-                      <td className="py-3 px-3 text-sm text-gray-600">{idx + 1}</td>
-                      <td className="py-3 px-3 text-sm font-medium text-gray-900">{row.location}</td>
-                      <td className="py-3 px-3 text-sm text-gray-700">{row.processType}</td>
-                      
-                      <td className="py-3 px-3 text-sm text-right bg-orange-50/30 font-medium">
-                        {formatNumber(row.duplicateHours)}
-                      </td>
-                      <td className="py-3 px-3 text-sm text-right bg-orange-50/30 text-orange-700 font-semibold">
-                        {formatCurrency(row.duplicateTotal || 0)}
-                      </td>
-                      
-                      <td className="py-3 px-3 text-sm text-right bg-purple-50/30 font-medium">
-                        {formatNumber(row.keyHours)}
-                      </td>
-                      <td className="py-3 px-3 text-sm text-right bg-purple-50/30 text-purple-700 font-semibold">
-                        {formatCurrency(row.keyTotal || 0)}
-                      </td>
-                      
-                      <td className="py-3 px-3 text-sm text-right bg-blue-50/30 font-medium">
-                        {formatNumber(row.newRequestHours)}
-                      </td>
-                      <td className="py-3 px-3 text-sm text-right bg-blue-50/30 text-blue-700 font-semibold">
-                        {formatCurrency(row.newRequestTotal || 0)}
-                      </td>
-                      
-                      <td className="py-3 px-3 text-sm text-right bg-green-50/30 font-bold text-gray-900">
-                        {formatNumber(row.totalCasesHours)}
-                      </td>
-                      <td className="py-3 px-3 text-sm text-right bg-green-50/30 font-bold text-green-700">
-                        {formatCurrency(row.totalBilling || 0)}
-                      </td>
-                      
-                      <td className="py-3 px-3 text-sm text-center">
-                        <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
-                          row.geographyType === 'onshore' 
-                            ? 'bg-blue-100 text-blue-800' 
-                            : 'bg-green-100 text-green-800'
-                        }`}>
-                          {row.geographyType === 'onshore' ? 'US' : 'IND'}
-                        </span>
-                      </td>
+          {showDetailed && (
+            <>
+              <div className="overflow-auto" style={{ maxHeight: '32vh' }}>
+                <table className="w-full text-xs">
+                  <thead className="sticky top-0 z-10 bg-slate-50">
+                    <tr>
+                      <th className="py-2 px-2 text-left font-semibold border-b">Date</th>
+                      <th className="py-2 px-2 text-left font-semibold border-b">Resource</th>
+                      <th className="py-2 px-2 text-left font-semibold border-b">Location</th>
+                      <th className="py-2 px-2 text-left font-semibold border-b">Type</th>
+                      <th className="py-2 px-2 text-right font-semibold border-b">Count</th>
+                      <th className="py-2 px-2 text-right font-semibold border-b">Rate</th>
+                      <th className="py-2 px-2 text-right font-semibold border-b bg-green-50">Amount</th>
+                      <th className="py-2 px-2 text-left font-semibold border-b">Remark</th>
                     </tr>
-                  ))}
-                  
-                  {totals && (
-                    <tr className="bg-gray-100 font-bold border-t-2 border-gray-300">
-                      <td className="py-4 px-3"></td>
-                      <td className="py-4 px-3 text-sm text-gray-900 uppercase">Grand Total</td>
-                      <td className="py-4 px-3"></td>
-                      
-                      <td className="py-4 px-3 text-sm text-right bg-orange-100">
-                        {formatNumber(totals.duplicateHours)}
-                      </td>
-                      <td className="py-4 px-3 text-sm text-right bg-orange-100 text-orange-800">
-                        {formatCurrency(totals.duplicateTotal || 0)}
-                      </td>
-                      
-                      <td className="py-4 px-3 text-sm text-right bg-purple-100">
-                        {formatNumber(totals.keyHours)}
-                      </td>
-                      <td className="py-4 px-3 text-sm text-right bg-purple-100 text-purple-800">
-                        {formatCurrency(totals.keyTotal || 0)}
-                      </td>
-                      
-                      <td className="py-4 px-3 text-sm text-right bg-blue-100">
-                        {formatNumber(totals.newRequestHours)}
-                      </td>
-                      <td className="py-4 px-3 text-sm text-right bg-blue-100 text-blue-800">
-                        {formatCurrency(totals.newRequestTotal || 0)}
-                      </td>
-                      
-                      <td className="py-4 px-3 text-sm text-right bg-green-100 text-gray-900">
-                        {formatNumber(totals.totalCasesHours)}
-                      </td>
-                      <td className="py-4 px-3 text-sm text-right bg-green-100 text-green-800">
-                        {formatCurrency(totals.totalBilling || 0)}
-                      </td>
-                      
-                      <td className="py-4 px-3"></td>
-                    </tr>
-                  )}
-                </>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Summary Cards */}
-      {grandTotals && grandTotals.totalCasesHours > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-white rounded-xl shadow-md p-4 border-l-4 border-orange-500">
-            <div className="text-sm text-gray-500 uppercase tracking-wider">Duplicate</div>
-            <div className="text-sm font-bold text-gray-900 mt-1">
-              {formatNumber(grandTotals.duplicateHours)} cases
-            </div>
-            <div className="text-sm font-semibold text-orange-600">
-              {formatCurrency(grandTotals.duplicateTotal)}
-            </div>
-          </div>
-          
-          <div className="bg-white rounded-xl shadow-md p-4 border-l-4 border-purple-500">
-            <div className="text-sm text-gray-500 uppercase tracking-wider">Key</div>
-            <div className="text-sm font-bold text-gray-900 mt-1">
-              {formatNumber(grandTotals.keyHours)} cases
-            </div>
-            <div className="text-sm font-semibold text-purple-600">
-              {formatCurrency(grandTotals.keyTotal)}
-            </div>
-          </div>
-          
-          <div className="bg-white rounded-xl shadow-md p-4 border-l-4 border-blue-500">
-            <div className="text-sm text-gray-500 uppercase tracking-wider">New Request</div>
-            <div className="text-sm font-bold text-gray-900 mt-1">
-              {formatNumber(grandTotals.newRequestHours)} cases
-            </div>
-            <div className="text-sm font-semibold text-blue-600">
-              {formatCurrency(grandTotals.newRequestTotal)}
-            </div>
-          </div>
-          
-          <div className="bg-white rounded-xl shadow-md p-4 border-l-4 border-green-500">
-            <div className="text-sm text-gray-500 uppercase tracking-wider">Grand Total</div>
-            <div className="text-sm font-bold text-gray-900 mt-1">
-              {formatNumber(grandTotals.totalCasesHours)} cases
-            </div>
-            <div className="text-sm font-semibold text-green-600">
-              {formatCurrency(grandTotals.totalBilling)}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Detailed Entries Section */}
-      {allocations.length > 0 && (
-        <div className="bg-white rounded-xl shadow-md overflow-hidden">
-          <div className="p-4 bg-gray-50 border-b">
-            <h3 className="text-lg font-semibold text-gray-800">Detailed Allocation Entries</h3>
-            <p className="text-sm text-gray-500">Individual entries logged by resources</p>
-          </div>
-          <div className="overflow-x-auto max-h-96">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-gray-100">
-                <tr>
-                  <th className="py-2 px-3 text-left">Date</th>
-                  <th className="py-2 px-3 text-left">Resource</th>
-                  <th className="py-2 px-3 text-left">Location</th>
-                  <th className="py-2 px-3 text-left">Request Type</th>
-                  <th className="py-2 px-3 text-right">Count</th>
-                  <th className="py-2 px-3 text-right">Rate</th>
-                  <th className="py-2 px-3 text-right">Amount</th>
-                  <th className="py-2 px-3 text-left">Remark</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {allocations.slice(0, 100).map((entry, idx) => (
-                  <tr key={entry._id || idx} className="hover:bg-gray-50">
-                    <td className="py-2 px-3">{formatDate(entry.allocation_date)}</td>
-                    <td className="py-2 px-3">{entry.resource_name}</td>
-                    <td className="py-2 px-3">{entry.subproject_name}</td>
-                    <td className="py-2 px-3">
-                      <span className={`px-2 py-1 rounded text-xs font-medium ${
-                        entry.request_type === 'New Request' ? 'bg-blue-100 text-blue-700' :
-                        entry.request_type === 'Key' ? 'bg-purple-100 text-purple-700' :
-                        'bg-orange-100 text-orange-700'
-                      }`}>
-                        {entry.request_type}
-                      </span>
-                    </td>
-                    <td className="py-2 px-3 text-right font-medium">{entry.count || 1}</td>
-                    <td className="py-2 px-3 text-right text-gray-500">{formatCurrency(entry.billing_rate)}</td>
-                    <td className="py-2 px-3 text-right text-green-600 font-medium">{formatCurrency(entry.billing_amount)}</td>
-                    <td className="py-2 px-3 text-gray-500 truncate max-w-[200px]" title={entry.remark}>{entry.remark || '-'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {allocations.length > 100 && (
-              <div className="text-center py-3 text-gray-500 text-sm bg-gray-50">
-                Showing 100 of {allocations.length} entries
+                  </thead>
+                  <tbody>
+                    {paginatedDetailed.length === 0 ? (
+                      <tr><td colSpan={8} className="py-6 text-center text-gray-500">No entries</td></tr>
+                    ) : (
+                      paginatedDetailed.map((a, i) => (
+                        <tr key={a._id || i} className="border-b border-slate-100 hover:bg-slate-50">
+                          <td className="py-1.5 px-2 text-slate-600">{formatDate(a.allocation_date)}</td>
+                          <td className="py-1.5 px-2 font-medium text-slate-800">{a.resource_name}</td>
+                          <td className="py-1.5 px-2 text-slate-700 max-w-[120px] truncate" title={a.subproject_name}>{a.subproject_name}</td>
+                          <td className="py-1.5 px-2"><RequestTypeBadge type={a.request_type} /></td>
+                          <td className="py-1.5 px-2 text-right font-medium text-slate-800">{a.count || 1}</td>
+                          <td className="py-1.5 px-2 text-right text-slate-600">{formatCurrency(a.billing_rate)}</td>
+                          <td className="py-1.5 px-2 text-right font-semibold text-green-700 bg-green-50/50">{formatCurrency(a.billing_amount)}</td>
+                          <td className="py-1.5 px-2 text-slate-500 max-w-[100px] truncate" title={a.remark}>{a.remark || '—'}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
               </div>
-            )}
-          </div>
+
+              {/* Pagination */}
+              {detailedTotalPages > 1 && (
+                <div className="px-3 py-2 border-t bg-gray-50 flex items-center justify-between text-xs">
+                  <span className="text-gray-500">Page {detailedPage} of {detailedTotalPages} ({formatNumber(filteredDetailed.length)} total)</span>
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => setDetailedPage(1)} disabled={detailedPage <= 1} className="px-2 py-1 border rounded hover:bg-gray-100 disabled:opacity-50">««</button>
+                    <button onClick={() => setDetailedPage(p => p - 1)} disabled={detailedPage <= 1} className="px-2 py-1 border rounded hover:bg-gray-100 disabled:opacity-50">‹</button>
+                    <span className="px-2">{detailedPage}</span>
+                    <button onClick={() => setDetailedPage(p => p + 1)} disabled={detailedPage >= detailedTotalPages} className="px-2 py-1 border rounded hover:bg-gray-100 disabled:opacity-50">›</button>
+                    <button onClick={() => setDetailedPage(detailedTotalPages)} disabled={detailedPage >= detailedTotalPages} className="px-2 py-1 border rounded hover:bg-gray-100 disabled:opacity-50">»»</button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 };

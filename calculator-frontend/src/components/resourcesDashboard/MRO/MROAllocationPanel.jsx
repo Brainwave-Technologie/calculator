@@ -418,7 +418,7 @@ const MROAllocationPanel = ({
                       const isPending = entryCount === 0;
                       return (
                         <option key={loc.subproject_id} value={loc.subproject_id}>
-                          {loc.subproject_name} {entryCount > 0 ? `(${entryCount} entries)` : '⚠️ Pending'}
+                          {loc.subproject_name} 
                         </option>
                       );
                     })}

@@ -1,934 +1,834 @@
-// routes/billing.js
+// routes/billing.routes.js
+// Billing/Costing routes that integrate with VerismaDailyAllocation and MRODailyAllocation
+// Provides real-time data from resource-logged entries for Costing dashboards
+
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
+const ExcelJS = require('exceljs');
+
+// Models
 const Billing = require('../models/Billing');
-const Project = require('../models/Project');
-const Subproject = require('../models/Subproject.js');
+const VerismaDailyAllocation = require('../models/Allocations/Verismadailyallocation');
+const MRODailyAllocation = require('../models/Allocations/MROdailyallocation');
 const Resource = require('../models/Resource');
-const Productivity = require('../models/SubprojectProductivity');
-const SubprojectRequestType = require('../models/SubprojectRequestType');
+const Subproject = require('../models/Subproject');
+const Client = require('../models/Client');
+const Project = require('../models/Project');
 
-// ================= GET billing records (Standard) =================
-router.get('/', async (req, res) => {
-  const { project_id, subproject_id, month, year, billable_status, request_type } = req.query;
+// ═══════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════
 
+const formatDateKey = (date) => {
+  const d = new Date(date);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+/**
+ * Get aggregated billing data directly from Verisma allocations
+ */
+async function getVerismaBillingData(month, year, filters = {}) {
+  const startDate = new Date(year, month - 1, 1);
+  const endDate = new Date(year, month, 0, 23, 59, 59, 999);
+  
+  const matchStage = {
+    allocation_date: { $gte: startDate, $lte: endDate },
+    is_deleted: { $ne: true }
+  };
+  
+  if (filters.project_id) {
+    matchStage.project_id = new mongoose.Types.ObjectId(filters.project_id);
+  }
+  if (filters.subproject_id) {
+    matchStage.subproject_id = new mongoose.Types.ObjectId(filters.subproject_id);
+  }
+  if (filters.request_type) {
+    matchStage.request_type = filters.request_type;
+  }
+  if (filters.resource_email) {
+    matchStage.resource_email = filters.resource_email.toLowerCase();
+  }
+  
+  const pipeline = [
+    { $match: matchStage },
+    {
+      $group: {
+        _id: {
+          resource_id: '$resource_id',
+          subproject_id: '$subproject_id',
+          request_type: '$request_type'
+        },
+        resource_name: { $first: '$resource_name' },
+        resource_email: { $first: '$resource_email' },
+        geography_id: { $first: '$geography_id' },
+        geography_name: { $first: '$geography_name' },
+        client_id: { $first: '$client_id' },
+        project_id: { $first: '$project_id' },
+        project_name: { $first: '$project_name' },
+        subproject_name: { $first: '$subproject_name' },
+        total_cases: { $sum: '$count' },
+        total_billing: { $sum: '$billing_amount' },
+        avg_rate: { $avg: '$billing_rate' },
+        entry_count: { $sum: 1 },
+        working_days: { $addToSet: { $dateToString: { format: '%Y-%m-%d', date: '$allocation_date' } } }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        resource_id: '$_id.resource_id',
+        subproject_id: '$_id.subproject_id',
+        request_type: '$_id.request_type',
+        resource_name: 1,
+        resource_email: 1,
+        geography_id: 1,
+        geography_name: 1,
+        client_id: 1,
+        client_name: { $literal: 'Verisma' },
+        project_id: 1,
+        project_name: 1,
+        subproject_name: 1,
+        cases: '$total_cases',
+        total_amount: '$total_billing',
+        flatrate: '$avg_rate',
+        entry_count: 1,
+        working_days: { $size: '$working_days' }
+      }
+    },
+    { $sort: { resource_name: 1, subproject_name: 1 } }
+  ];
+  
+  return VerismaDailyAllocation.aggregate(pipeline);
+}
+
+/**
+ * Get aggregated billing data directly from MRO allocations
+ */
+async function getMROBillingData(month, year, filters = {}) {
+  const startDate = new Date(year, month - 1, 1);
+  const endDate = new Date(year, month, 0, 23, 59, 59, 999);
+  
+  const matchStage = {
+    allocation_date: { $gte: startDate, $lte: endDate },
+    is_deleted: { $ne: true }
+  };
+  
+  if (filters.project_id) {
+    matchStage.project_id = new mongoose.Types.ObjectId(filters.project_id);
+  }
+  if (filters.subproject_id) {
+    matchStage.subproject_id = new mongoose.Types.ObjectId(filters.subproject_id);
+  }
+  if (filters.process_type) {
+    matchStage.process_type = filters.process_type;
+  }
+  if (filters.requestor_type) {
+    matchStage.requestor_type = filters.requestor_type;
+  }
+  if (filters.resource_email) {
+    matchStage.resource_email = filters.resource_email.toLowerCase();
+  }
+  
+  const pipeline = [
+    { $match: matchStage },
+    {
+      $group: {
+        _id: {
+          resource_id: '$resource_id',
+          subproject_id: '$subproject_id',
+          process_type: '$process_type',
+          requestor_type: '$requestor_type'
+        },
+        resource_name: { $first: '$resource_name' },
+        resource_email: { $first: '$resource_email' },
+        geography_id: { $first: '$geography_id' },
+        geography_name: { $first: '$geography_name' },
+        client_id: { $first: '$client_id' },
+        project_id: { $first: '$project_id' },
+        project_name: { $first: '$project_name' },
+        subproject_name: { $first: '$subproject_name' },
+        total_cases: { $sum: 1 },
+        total_billing: { $sum: '$billing_amount' },
+        avg_rate: { $avg: '$billing_rate' },
+        entry_count: { $sum: 1 },
+        working_days: { $addToSet: { $dateToString: { format: '%Y-%m-%d', date: '$allocation_date' } } }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        resource_id: '$_id.resource_id',
+        subproject_id: '$_id.subproject_id',
+        process_type: '$_id.process_type',
+        requestor_type: '$_id.requestor_type',
+        resource_name: 1,
+        resource_email: 1,
+        geography_id: 1,
+        geography_name: 1,
+        client_id: 1,
+        client_name: { $literal: 'MRO' },
+        project_id: 1,
+        project_name: 1,
+        subproject_name: 1,
+        cases: '$total_cases',
+        total_amount: '$total_billing',
+        flatrate: '$avg_rate',
+        entry_count: 1,
+        working_days: { $size: '$working_days' }
+      }
+    },
+    { $sort: { resource_name: 1, subproject_name: 1 } }
+  ];
+  
+  return MRODailyAllocation.aggregate(pipeline);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// GET BILLING DATA BY CLIENT (LIVE FROM ALLOCATIONS)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * GET /billing/live/:client
+ * Get live billing data directly from allocation models (not from Billing collection)
+ */
+router.get('/live/:client', async (req, res) => {
   try {
-    const filters = {};
-    if (project_id) filters.project_id = project_id;
-    if (subproject_id) filters.subproject_id = subproject_id;
-    if (request_type) filters.request_type = request_type;
-
-    if (month === 'null') {
-      filters.month = { $in: [null, undefined] };
-    } else if (month) {
-      filters.month = parseInt(month);
+    const { client } = req.params;
+    const { month, year, project_id, subproject_id, request_type, process_type, search, page = 1, limit = 50 } = req.query;
+    
+    const monthNum = parseInt(month) || new Date().getMonth() + 1;
+    const yearNum = parseInt(year) || new Date().getFullYear();
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    
+    const filters = { project_id, subproject_id, request_type, process_type };
+    
+    let records = [];
+    
+    if (client.toLowerCase() === 'verisma') {
+      records = await getVerismaBillingData(monthNum, yearNum, filters);
+    } else if (client.toLowerCase() === 'mro') {
+      records = await getMROBillingData(monthNum, yearNum, filters);
+    } else {
+      return res.status(400).json({ message: 'Invalid client. Use verisma, mro, or datavant' });
     }
-
-    if (year) { filters.year = parseInt(year) }
-    else filters.year = new Date().getFullYear();
-
-    if (billable_status) filters.billable_status = billable_status;
-
-    const billings = await Billing.find(filters)
-      .populate('project_id', 'name')
-      .populate('subproject_id', 'name')
-      .sort({ created_at: -1 })
-      .lean();
-
-    const response = billings.map(b => ({
-      ...b,
-      project_name: b.project_id?.name || null,
-      subproject_name: b.subproject_id?.name || null
-    }));
-
-    res.json(response);
+    
+    // Search filter
+    if (search) {
+      const searchLower = search.toLowerCase();
+      records = records.filter(r => 
+        r.resource_name?.toLowerCase().includes(searchLower) ||
+        r.subproject_name?.toLowerCase().includes(searchLower)
+      );
+    }
+    
+    // Enrich with resource rates
+    for (const record of records) {
+      const resource = await Resource.findById(record.resource_id).lean();
+      record.resource_role = resource?.role || 'Associate';
+      
+      // Get cost rate from assignments
+      let costRate = 0;
+      if (resource?.assignments) {
+        for (const assignment of resource.assignments) {
+          if (assignment.client_name?.toLowerCase() === client.toLowerCase()) {
+            costRate = assignment.default_rate || 0;
+            break;
+          }
+        }
+      }
+      record.rate = costRate;
+      
+      // Estimate hours (can be overridden by admin)
+      record.hours = record.cases * 0.5; // Default estimate
+      record.costing = record.hours * record.rate;
+      record.profit = record.total_amount - record.costing;
+      record.billable_status = 'Billable';
+      record.month = monthNum;
+      record.year = yearNum;
+      
+      // Generate unique ID for frontend
+      record.uniqueId = `${record.resource_id}-${record.subproject_id}-${record.request_type || record.requestor_type || 'default'}`;
+    }
+    
+    // Calculate totals
+    const totals = {
+      totalCases: records.reduce((sum, r) => sum + (r.cases || 0), 0),
+      totalHours: records.reduce((sum, r) => sum + (r.hours || 0), 0),
+      totalCosting: records.reduce((sum, r) => sum + (r.costing || 0), 0),
+      totalRevenue: records.reduce((sum, r) => sum + (r.total_amount || 0), 0),
+      profit: 0,
+      resourceCount: new Set(records.map(r => r.resource_id?.toString())).size
+    };
+    totals.profit = totals.totalRevenue - totals.totalCosting;
+    
+    // Pagination
+    const total = records.length;
+    const skip = (pageNum - 1) * limitNum;
+    const paginatedRecords = records.slice(skip, skip + limitNum);
+    
+    res.json({
+      success: true,
+      client: client,
+      month: monthNum,
+      year: yearNum,
+      records: paginatedRecords,
+      total,
+      totalPages: Math.ceil(total / limitNum),
+      page: pageNum,
+      hasMore: pageNum * limitNum < total,
+      totals
+    });
+    
   } catch (err) {
-    console.error(err);
+    console.error('Live billing error:', err);
     res.status(500).json({ message: err.message });
   }
 });
 
-// ================= GET PAGINATED BILLING WITH RESOURCE ASSIGNMENTS & REQUEST TYPES =================
-router.get('/paginated', async (req, res) => {
+// ═══════════════════════════════════════════════════════════════
+// GET CLIENT DASHBOARD DATA (FOR COSTING PAGE)
+// ═══════════════════════════════════════════════════════════════
+
+router.get('/client-dashboard', async (req, res) => {
   try {
     const {
-      page = 1,
-      limit = 50,
-      month,
-      year,
+      client_id,
+      client_name,
       project_id,
       subproject_id,
       request_type,
+      month,
+      year,
       search,
       sort_by = 'resource_name',
       sort_order = 'ascending',
-      show_non_billable = 'true'
+      show_non_billable = 'true',
+      page = 1,
+      limit = 50
     } = req.query;
-
+    
+    const monthNum = parseInt(month) || new Date().getMonth() + 1;
+    const yearNum = parseInt(year) || new Date().getFullYear();
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
-    const skip = (pageNum - 1) * limitNum;
-
-    // ============================================
-    // STEP 1: Get all active resource assignments
-    // ============================================
-    let resourceQuery = {};
     
-    if (subproject_id) {
-      resourceQuery.assigned_subprojects = new mongoose.Types.ObjectId(subproject_id);
-    } else if (project_id) {
-      const subprojects = await Subproject.find({ project_id }).select('_id').lean();
-      const subprojectIds = subprojects.map(sp => sp._id);
-      resourceQuery.assigned_subprojects = { $in: subprojectIds };
+    // Determine client
+    let clientNameToUse = client_name;
+    if (client_id && !clientNameToUse) {
+      const client = await Client.findById(client_id).lean();
+      clientNameToUse = client?.name;
     }
-
-    if (search && search.trim()) {
-      resourceQuery.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } }
-      ];
-    }
-
-    const resources = await Resource.find(resourceQuery)
-      .populate('assigned_subprojects', 'name flatrate project_id')
-      .lean();
-
-    // ============================================
-    // STEP 2: Get all subproject IDs and fetch their request types
-    // ============================================
-    const uniqueSubprojectIds = new Set();
     
-    for (const resource of resources) {
-      for (const subproject of resource.assigned_subprojects || []) {
-        if (subproject_id && subproject._id.toString() !== subproject_id) continue;
-        if (project_id && subproject.project_id && subproject.project_id.toString() !== project_id) continue;
-        uniqueSubprojectIds.add(subproject._id.toString());
-      }
+    if (!clientNameToUse) {
+      return res.status(400).json({ message: 'client_id or client_name required' });
     }
-
-    const subprojectIdsArray = Array.from(uniqueSubprojectIds).map(id => {
-      try {
-        return new mongoose.Types.ObjectId(id);
-      } catch (e) {
-        return id;
-      }
-    });
-
-    // Fetch ALL request types for these subprojects
-    const requestTypes = await SubprojectRequestType.find({
-      subproject_id: { $in: subprojectIdsArray }
-    }).lean();
-
-    // Create request type map: subproject_id -> [{ name, rate, _id }]
-    const requestTypeMap = new Map();
-    requestTypes.forEach(rt => {
-      const spId = rt.subproject_id.toString();
-      if (!requestTypeMap.has(spId)) {
-        requestTypeMap.set(spId, []);
-      }
-      requestTypeMap.get(spId).push({
-        _id: rt._id,
-        name: rt.name,
-        rate: rt.rate || 0
-      });
-    });
-
-    // ============================================
-    // STEP 3: Build resource-subproject-requestType pairs
-    // ============================================
-    const resourceSubprojectPairs = [];
     
-    for (const resource of resources) {
-      for (const subproject of resource.assigned_subprojects || []) {
-        if (subproject_id && subproject._id.toString() !== subproject_id) continue;
-        if (project_id && subproject.project_id && subproject.project_id.toString() !== project_id) continue;
-
-        const spIdStr = subproject._id.toString();
-        const spRequestTypes = requestTypeMap.get(spIdStr) || [];
-
-        // If no request types defined, create one entry with null request_type
-        if (spRequestTypes.length === 0) {
-          resourceSubprojectPairs.push({
-            resource_id: resource._id,
-            resource_name: resource.name,
-            resource_email: resource.email,
-            resource_role: resource.role,
-            resource_avatar: resource.avatar_url,
-            subproject_id: subproject._id,
-            subproject_id_str: spIdStr,
-            subproject_name: subproject.name,
-            subproject_flatrate: subproject.flatrate || 0,
-            project_id: subproject.project_id,
-            request_type: null,
-            request_type_rate: 0
-          });
-        } else {
-          // Create one entry per request type (should be 3: New Request, Key, Duplicate)
-          for (const rt of spRequestTypes) {
-            // Apply request_type filter if provided
-            if (request_type && rt.name !== request_type) continue;
-
-            resourceSubprojectPairs.push({
-              resource_id: resource._id,
-              resource_name: resource.name,
-              resource_email: resource.email,
-              resource_role: resource.role,
-              resource_avatar: resource.avatar_url,
-              subproject_id: subproject._id,
-              subproject_id_str: spIdStr,
-              subproject_name: subproject.name,
-              subproject_flatrate: subproject.flatrate || 0,
-              project_id: subproject.project_id,
-              request_type: rt.name,
-              request_type_id: rt._id,
-              request_type_rate: rt.rate || 0
-            });
+    const filters = { project_id, subproject_id, request_type };
+    
+    // Get live data from allocations
+    let records = [];
+    if (clientNameToUse.toLowerCase() === 'verisma') {
+      records = await getVerismaBillingData(monthNum, yearNum, filters);
+    } else if (clientNameToUse.toLowerCase() === 'mro') {
+      records = await getMROBillingData(monthNum, yearNum, filters);
+    }
+    
+    // Search filter
+    if (search) {
+      const searchLower = search.toLowerCase();
+      records = records.filter(r => 
+        r.resource_name?.toLowerCase().includes(searchLower) ||
+        r.subproject_name?.toLowerCase().includes(searchLower)
+      );
+    }
+    
+    // Enrich records with additional data
+    for (const record of records) {
+      const resource = await Resource.findById(record.resource_id).lean();
+      const subproject = await Subproject.findById(record.subproject_id).lean();
+      
+      record.resource_role = resource?.role || 'Associate';
+      record.flatrate = record.flatrate || subproject?.flatrate || 0;
+      
+      // Get cost rate
+      let costRate = 0;
+      if (resource?.assignments) {
+        for (const assignment of resource.assignments) {
+          if (assignment.client_name?.toLowerCase() === clientNameToUse.toLowerCase()) {
+            costRate = assignment.default_rate || 0;
+            break;
           }
         }
       }
+      record.rate = costRate;
+      record.hours = record.hours || record.cases * 0.5;
+      record.costing = record.hours * record.rate;
+      record.profit = record.total_amount - record.costing;
+      record.billable_status = 'Billable';
+      record.uniqueId = `${record.resource_id}-${record.subproject_id}-${record.request_type || record.requestor_type || 'default'}`;
     }
-
-    // ============================================
-    // STEP 4: Fetch productivity rates
-    // ============================================
-    const productivityRates = await Productivity.find({
-      subproject_id: { $in: subprojectIdsArray }
-    }).lean();
-
-    const productivityMap = new Map();
-    productivityRates.forEach(rate => {
-      const spId = rate.subproject_id.toString();
-      if (!productivityMap.has(spId)) {
-        productivityMap.set(spId, []);
-      }
-      productivityMap.get(spId).push({
-        level: rate.level.toLowerCase(),
-        base_rate: rate.base_rate || 0
-      });
-    });
-
-    // ============================================
-    // STEP 5: Fetch billing records
-    // ============================================
-    const billingQuery = {
-      year: parseInt(year) || new Date().getFullYear()
-    };
-
-    if (month === 'null' || month === null || month === undefined) {
-      billingQuery.month = null;
-    } else if (month) {
-      billingQuery.month = parseInt(month);
-    }
-
-    if (subproject_id) {
-      billingQuery.subproject_id = new mongoose.Types.ObjectId(subproject_id);
-    } else if (project_id) {
-      const subprojects = await Subproject.find({ project_id }).select('_id').lean();
-      billingQuery.subproject_id = { $in: subprojects.map(sp => sp._id) };
-    }
-
-    if (request_type) {
-      billingQuery.request_type = request_type;
-    }
-
-    const resourceIds = [...new Set(resourceSubprojectPairs.map(p => p.resource_id.toString()))];
-    if (resourceIds.length > 0) {
-      billingQuery.resource_id = { $in: resourceIds.map(id => new mongoose.Types.ObjectId(id)) };
-    }
-
-    const billingRecords = await Billing.find(billingQuery)
-      .populate('project_id', 'name')
-      .lean();
-
-    // Create billing map with request_type as part of the key
-    const billingMap = new Map();
-    billingRecords.forEach(billing => {
-      const key = `${billing.resource_id.toString()}-${billing.subproject_id.toString()}-${billing.request_type || 'null'}`;
-      billingMap.set(key, billing);
-    });
-
-    // ============================================
-    // STEP 6: Fetch project info
-    // ============================================
-    const uniqueProjectIds = [...new Set(
-      resourceSubprojectPairs
-        .filter(p => p.project_id)
-        .map(p => p.project_id.toString())
-    )];
     
-    const projects = await Project.find({
-      _id: { $in: uniqueProjectIds }
-    }).select('name').lean();
-    
-    const projectMap = new Map(projects.map(p => [p._id.toString(), p]));
-
-    // ============================================
-    // STEP 7: Helper function to get rate for a level
-    // ============================================
-    const getRateForLevel = (rates, level) => {
-      if (!rates || rates.length === 0) return 0;
-      const normalizedLevel = (level || 'medium').toLowerCase();
-      const found = rates.find(r => r.level === normalizedLevel);
-      return found ? found.base_rate : 0;
-    };
-
-    // ============================================
-    // STEP 8: Merge pairs with billing data
-    // ============================================
-    const mergedData = resourceSubprojectPairs.map((pair) => {
-      const key = `${pair.resource_id.toString()}-${pair.subproject_id.toString()}-${pair.request_type || 'null'}`;
-      const billing = billingMap.get(key);
-      const projectInfo = projectMap.get(pair.project_id?.toString());
-      
-      // Get productivity rates for this subproject
-      const rates = productivityMap.get(pair.subproject_id_str) || [];
-      const mediumRate = getRateForLevel(rates, 'medium');
-      
-      // Get available request types for this subproject
-      const availableRequestTypes = requestTypeMap.get(pair.subproject_id_str) || [];
-      
-      if (billing) {
-        // Has billing record
-        const storedLevel = (billing.productivity_level || 'medium').toLowerCase();
-        const currentRate = getRateForLevel(rates, storedLevel) || billing.rate || 0;
-
-        return {
-          uniqueId: `${pair.project_id}-${pair.subproject_id}-${pair.resource_id}-${pair.request_type || 'none'}`,
-          _id: pair.resource_id,
-          billingId: billing._id,
-          isMonthlyRecord: billing.month !== null,
-          
-          name: pair.resource_name,
-          email: pair.resource_email,
-          role: pair.resource_role,
-          avatar_url: pair.resource_avatar,
-          
-          projectId: pair.project_id,
-          projectName: projectInfo?.name || 'Unknown',
-          subprojectId: pair.subproject_id,
-          subProjectName: pair.subproject_name,
-          
-          requestType: billing.request_type || pair.request_type,
-          requestTypeRate: pair.request_type_rate,
-          availableRequestTypes: availableRequestTypes,
-          
-          hours: billing.hours || 0,
-          rate: currentRate,
-          flatrate: pair.subproject_flatrate,
-          productivity: billing.productivity_level || 'Medium',
-          description: billing.description || '',
-          isBillable: billing.billable_status === 'Billable',
-          
-          costing: (billing.hours || 0) * currentRate,
-          totalBill: (billing.hours || 0) * pair.subproject_flatrate,
-          
-          availableRates: rates,
-          hasProductivityRates: rates.length > 0,
-          isEditable: true
-        };
-      } else {
-        // No billing record
-        return {
-          uniqueId: `${pair.project_id}-${pair.subproject_id}-${pair.resource_id}-${pair.request_type || 'none'}`,
-          _id: pair.resource_id,
-          billingId: null,
-          isMonthlyRecord: false,
-          
-          name: pair.resource_name,
-          email: pair.resource_email,
-          role: pair.resource_role,
-          avatar_url: pair.resource_avatar,
-          
-          projectId: pair.project_id,
-          projectName: projectInfo?.name || 'Unknown',
-          subprojectId: pair.subproject_id,
-          subProjectName: pair.subproject_name,
-          
-          requestType: pair.request_type,
-          requestTypeRate: pair.request_type_rate,
-          availableRequestTypes: availableRequestTypes,
-          
-          hours: 0,
-          rate: mediumRate,
-          flatrate: pair.subproject_flatrate,
-          productivity: 'Medium',
-          description: '',
-          isBillable: true,
-          
-          costing: 0,
-          totalBill: 0,
-          
-          availableRates: rates,
-          hasProductivityRates: rates.length > 0,
-          isEditable: true
-        };
-      }
-    });
-
-    // ============================================
-    // STEP 9: Filter, Sort, Paginate
-    // ============================================
-    let filteredData = mergedData;
-    if (show_non_billable === 'false') {
-      filteredData = mergedData.filter(item => item.isBillable);
-    }
-
+    // Sorting
     const sortDirection = sort_order === 'descending' ? -1 : 1;
-    const sortFieldMap = {
-      'resource': 'name',
-      'resource_name': 'name',
-      'projectName': 'projectName',
-      'subProjectName': 'subProjectName',
-      'requestType': 'requestType',
-      'totalbill': 'totalBill',
-      'costing': 'costing',
-      'hours': 'hours',
-      'rate': 'rate',
-      'flatrate': 'flatrate',
-      'productivity': 'productivity'
-    };
-    
-    const sortField = sortFieldMap[sort_by] || 'name';
-    
-    filteredData.sort((a, b) => {
-      let aVal = a[sortField];
-      let bVal = b[sortField];
-      
+    records.sort((a, b) => {
+      const aVal = a[sort_by] || '';
+      const bVal = b[sort_by] || '';
       if (typeof aVal === 'string') {
-        return sortDirection * (aVal || '').localeCompare(bVal || '');
+        return aVal.localeCompare(bVal) * sortDirection;
       }
-      return sortDirection * ((aVal || 0) - (bVal || 0));
+      return (aVal - bVal) * sortDirection;
     });
-
-    const total = filteredData.length;
-    const paginatedData = filteredData.slice(skip, skip + limitNum);
-
-    // Response without warnings
-    res.json({
-      records: paginatedData,
-      total,
-      page: pageNum,
-      totalPages: Math.ceil(total / limitNum),
-      hasMore: pageNum < Math.ceil(total / limitNum)
-    });
-
-  } catch (err) {
-    console.error('Error in paginated billing:', err);
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ================= GET TOTALS =================
-router.get('/totals', async (req, res) => {
-  try {
-    const { month, year, project_id, subproject_id, request_type, show_non_billable = 'true' } = req.query;
-
-    const query = {
-      year: parseInt(year) || new Date().getFullYear()
+    
+    // Calculate totals
+    const totals = {
+      totalHours: records.reduce((sum, r) => sum + (r.hours || 0), 0),
+      totalCosting: records.reduce((sum, r) => sum + (r.costing || 0), 0),
+      totalRevenue: records.reduce((sum, r) => sum + (r.total_amount || 0), 0),
+      profit: 0,
+      resourceCount: new Set(records.map(r => r.resource_id?.toString())).size
     };
-
-    if (month === 'null' || month === null) {
-      query.month = null;
-    } else if (month) {
-      query.month = parseInt(month);
-    }
+    totals.profit = totals.totalRevenue - totals.totalCosting;
     
-    if (project_id) {
-      const subprojects = await Subproject.find({ project_id }).select('_id').lean();
-      query.subproject_id = { $in: subprojects.map(sp => sp._id) };
-    } else if (subproject_id) {
-      query.subproject_id = subproject_id;
-    }
-
-    if (request_type) {
-      query.request_type = request_type;
-    }
-
-    const pipeline = [
-      { $match: query },
-      {
-        $group: {
-          _id: null,
-          totalRevenue: {
-            $sum: {
-              $cond: [
-                { $eq: ['$billable_status', 'Billable'] },
-                '$total_amount',
-                0
-              ]
-            }
-          },
-          totalCost: { $sum: '$costing' },
-          totalRecords: { $sum: 1 },
-          billableRecords: {
-            $sum: {
-              $cond: [{ $eq: ['$billable_status', 'Billable'] }, 1, 0]
-            }
-          }
-        }
-      }
-    ];
-
-    const result = await Billing.aggregate(pipeline);
+    // Pagination
+    const total = records.length;
+    const skip = (pageNum - 1) * limitNum;
+    const paginatedRecords = records.slice(skip, skip + limitNum);
     
-    const totals = result[0] || {
-      totalRevenue: 0,
-      totalCost: 0,
-      totalRecords: 0,
-      billableRecords: 0
-    };
-
-    res.json({
-      revenue: totals.totalRevenue,
-      cost: totals.totalCost,
-      profit: totals.totalRevenue - totals.totalCost,
-      totalRecords: totals.totalRecords,
-      billableRecords: totals.billableRecords
-    });
-
-  } catch (err) {
-    console.error('Error calculating totals:', err);
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ================= CREATE billing record =================
-router.post('/', async (req, res) => {
-  try {
-    const {
-      project_id,
-      subproject_id,
-      resource_id,
-      request_type,
-      productivity_level,
-      flatrate,
-      hours,
-      rate,
-      description,
-      billable_status,
-      month,
-      year,
-    } = req.body;
-
-    const project = await Project.findById(project_id);
-    const subproject = await Subproject.findById(subproject_id);
-    if (!project) return res.status(404).json({ message: 'Project not found' });
-    
-    const resource = await Resource.findById(resource_id);
-    if (!resource) return res.status(404).json({ message: 'Resource not found' });
-
-    // Fetch rate from productivity table
-    const productivityLevel = productivity_level || 'medium';
-    const productivityRate = await Productivity.findOne({
-      subproject_id: subproject_id,
-      level: productivityLevel.toLowerCase()
-    }).lean();
-    
-    const finalRate = productivityRate?.base_rate || rate || 0;
-
-    const billingMonth = month || new Date().getMonth() + 1;
-    const billingYear = year || new Date().getFullYear();
-
-    // Use upsert to avoid duplicate key errors
-    const filter = {
-      project_id,
-      subproject_id,
-      resource_id,
-      month: billingMonth,
-      year: billingYear,
-      request_type: request_type || null
-    };
-
-    const updateData = {
-      $set: {
-        project_name: project.name,
-        subproject_name: subproject ? subproject.name : '',
-        resource_name: resource.name,
-        resource_role: resource.role,
-        flatrate: flatrate || subproject?.flatrate || 0,
-        productivity_level: productivity_level || 'Medium',
-        hours: hours || 0,
-        rate: finalRate,
-        costing: (hours || 0) * finalRate,
-        total_amount: (hours || 0) * (flatrate || subproject?.flatrate || 0),
-        billable_status: billable_status || 'Billable',
-        description: description || null,
-      },
-      $setOnInsert: {
-        project_id,
-        subproject_id,
-        resource_id,
-        month: billingMonth,
-        year: billingYear,
-        request_type: request_type || null
-      }
-    };
-
-    const result = await Billing.findOneAndUpdate(filter, updateData, {
-      upsert: true,
-      new: true,
-      runValidators: true
-    });
-
-    return res.status(200).json({ message: 'Saved successfully', billing: result });
-  } catch (err) {
-    return res.status(500).json({ message: 'Internal Server Error', error: err.message });
-  }
-});
-
-// ================= BULK UPDATE BILLING RECORDS =================
-router.patch('/bulk-update', async (req, res) => {
-  try {
-    const { updates } = req.body;
-    
-    if (!Array.isArray(updates) || updates.length === 0) {
-      return res.status(400).json({ message: 'Updates array is required' });
-    }
-
-    const results = [];
-    const errors = [];
-
-    for (const update of updates) {
-      try {
-        const { billingId, isMonthlyRecord, ...fields } = update;
-
-        const projectId = fields.projectId || fields.project_id;
-        const resourceId = fields._id || fields.resource_id;
-        const subprojectId = fields.subprojectId || fields.subproject_id;
-        const requestType = fields.requestType || fields.request_type || null;
-        const month = fields.month ? parseInt(fields.month) : new Date().getMonth() + 1;
-        const year = fields.year ? parseInt(fields.year) : new Date().getFullYear();
-
-        if (!projectId || !resourceId || !subprojectId) {
-          throw new Error('Missing required IDs (project, resource, subproject)');
-        }
-
-        // Build the filter for finding/creating the billing record
-        const filter = {
-          project_id: new mongoose.Types.ObjectId(projectId),
-          subproject_id: new mongoose.Types.ObjectId(subprojectId),
-          resource_id: new mongoose.Types.ObjectId(resourceId),
-          month: month,
-          year: year,
-          request_type: requestType
-        };
-
-        // Fetch related data
-        const [project, resource, subproject] = await Promise.all([
-          Project.findById(projectId).lean(),
-          Resource.findById(resourceId).lean(),
-          Subproject.findById(subprojectId).lean()
-        ]);
-
-        if (!project) throw new Error('Project not found');
-        if (!resource) throw new Error('Resource not found');
-        if (!subproject) throw new Error('Subproject not found');
-
-        // Determine productivity level
-        const productivityLevel = fields.productivity_level || fields.productivity || 'Medium';
-        const normalizedLevel = productivityLevel.toLowerCase();
-
-        // Fetch rate from productivity table
-        const productivityRate = await Productivity.findOne({
-          subproject_id: subprojectId,
-          level: normalizedLevel
-        }).lean();
-
-        const rate = productivityRate?.base_rate || 0;
-        const hours = fields.hours !== undefined ? Number(fields.hours) : 0;
-        const flatrate = fields.flatrate !== undefined ? Number(fields.flatrate) : (subproject.flatrate || 0);
-
-        // Build update data
-        const updateData = {
-          $set: {
-            project_name: project.name,
-            subproject_name: subproject.name,
-            resource_name: resource.name,
-            resource_role: resource.role,
-            productivity_level: productivityLevel.charAt(0).toUpperCase() + normalizedLevel.slice(1),
-            hours: hours,
-            rate: rate,
-            flatrate: flatrate,
-            costing: hours * rate,
-            total_amount: hours * flatrate,
-            billable_status: fields.isBillable !== undefined 
-              ? (fields.isBillable ? 'Billable' : 'Non-Billable')
-              : (fields.billable_status || 'Billable'),
-            description: fields.description || ''
-          },
-          $setOnInsert: {
-            project_id: new mongoose.Types.ObjectId(projectId),
-            subproject_id: new mongoose.Types.ObjectId(subprojectId),
-            resource_id: new mongoose.Types.ObjectId(resourceId),
-            month: month,
-            year: year,
-            request_type: requestType
-          }
-        };
-
-        // Use findOneAndUpdate with upsert to avoid duplicate key errors
-        const result = await Billing.findOneAndUpdate(
-          filter,
-          updateData,
-          { 
-            upsert: true, 
-            new: true,
-            runValidators: true
-          }
-        );
-
-        results.push(result);
-
-      } catch (error) {
-        console.error("Single update failed:", error.message);
-        errors.push({ 
-          update: { 
-            projectId: update.projectId, 
-            subprojectId: update.subprojectId, 
-            resourceId: update._id,
-            requestType: update.requestType 
-          }, 
-          error: error.message 
-        });
-      }
-    }
-
     res.json({
       success: true,
-      updated: results.length,
-      errors: errors.length > 0 ? errors : undefined,
-      results
+      records: paginatedRecords,
+      total,
+      totalPages: Math.ceil(total / limitNum),
+      page: pageNum,
+      hasMore: pageNum * limitNum < total,
+      totals
     });
-
+    
   } catch (err) {
-    console.error('Bulk update error:', err);
+    console.error('Client dashboard error:', err);
     res.status(500).json({ message: err.message });
   }
 });
 
-// ================= AUTO-GENERATE billing =================
-router.post('/auto-generate', async (req, res) => {
+// ═══════════════════════════════════════════════════════════════
+// UPDATE BILLING RECORD (HOURS, RATE, BILLABLE STATUS)
+// ═══════════════════════════════════════════════════════════════
+
+router.patch('/update', async (req, res) => {
   try {
-    const { resource_id } = req.body;
+    const {
+      resource_id,
+      subproject_id,
+      request_type,
+      requestor_type,
+      month,
+      year,
+      hours,
+      rate,
+      billable_status,
+      productivity_level
+    } = req.body;
+    
+    if (!resource_id || !subproject_id) {
+      return res.status(400).json({ message: 'resource_id and subproject_id required' });
+    }
+    
+    const monthNum = parseInt(month) || new Date().getMonth() + 1;
+    const yearNum = parseInt(year) || new Date().getFullYear();
+    
+    // Get subproject details
+    const subproject = await Subproject.findById(subproject_id).populate('project_id').lean();
+    const resource = await Resource.findById(resource_id).lean();
+    
+    if (!subproject || !resource) {
+      return res.status(404).json({ message: 'Subproject or Resource not found' });
+    }
+    
+    // Find or create billing record
+    const filter = {
+      resource_id: new mongoose.Types.ObjectId(resource_id),
+      subproject_id: new mongoose.Types.ObjectId(subproject_id),
+      request_type: request_type || requestor_type || null,
+      month: monthNum,
+      year: yearNum
+    };
+    
+    const updateFields = {};
+    
+    if (hours !== undefined) updateFields.hours = Number(hours) || 0;
+    if (rate !== undefined) updateFields.rate = Number(rate) || 0;
+    if (billable_status !== undefined) updateFields.billable_status = billable_status;
+    if (productivity_level !== undefined) updateFields.productivity_level = productivity_level;
+    
+    // Calculate costing if hours or rate changed
+    if (hours !== undefined || rate !== undefined) {
+      const newHours = hours !== undefined ? Number(hours) : 0;
+      const newRate = rate !== undefined ? Number(rate) : 0;
+      updateFields.costing = newHours * newRate;
+    }
+    
+    // Set denormalized fields
+    updateFields.geography_id = subproject.geography_id;
+    updateFields.client_id = subproject.client_id;
+    updateFields.project_id = subproject.project_id;
+    updateFields.geography_name = subproject.geography_name;
+    updateFields.client_name = subproject.client_name;
+    updateFields.project_name = subproject.project_id?.name || subproject.project_name;
+    updateFields.subproject_name = subproject.name;
+    updateFields.resource_name = resource.name;
+    updateFields.resource_email = resource.email;
+    updateFields.resource_role = resource.role;
+    updateFields.flatrate = subproject.flatrate || 0;
+    
+    const result = await Billing.findOneAndUpdate(
+      filter,
+      { $set: updateFields },
+      { upsert: true, new: true }
+    );
+    
+    res.json({ success: true, record: result });
+    
+  } catch (err) {
+    console.error('Update billing error:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
 
-    const resource = await Resource.findById(resource_id);
-    if (!resource) return res.status(404).json({ message: 'Resource not found' });
+// ═══════════════════════════════════════════════════════════════
+// GET TOTALS
+// ═══════════════════════════════════════════════════════════════
 
-    if (!resource.assigned_subprojects?.length)
-      return res.status(400).json({ message: 'No assigned subprojects for this resource' });
+router.get('/totals', async (req, res) => {
+  try {
+    const { client_name, client_id, project_id, subproject_id, month, year } = req.query;
+    
+    const monthNum = parseInt(month) || new Date().getMonth() + 1;
+    const yearNum = parseInt(year) || new Date().getFullYear();
+    
+    let clientNameToUse = client_name;
+    if (client_id && !clientNameToUse) {
+      const client = await Client.findById(client_id).lean();
+      clientNameToUse = client?.name;
+    }
+    
+    const filters = { project_id, subproject_id };
+    
+    let records = [];
+    if (clientNameToUse?.toLowerCase() === 'verisma') {
+      records = await getVerismaBillingData(monthNum, yearNum, filters);
+    } else if (clientNameToUse?.toLowerCase() === 'mro') {
+      records = await getMROBillingData(monthNum, yearNum, filters);
+    }
+    
+    // Enrich with rates
+    for (const record of records) {
+      const resource = await Resource.findById(record.resource_id).lean();
+      let costRate = 0;
+      if (resource?.assignments) {
+        for (const assignment of resource.assignments) {
+          if (assignment.client_name?.toLowerCase() === clientNameToUse?.toLowerCase()) {
+            costRate = assignment.default_rate || 0;
+            break;
+          }
+        }
+      }
+      record.rate = costRate;
+      record.hours = record.cases * 0.5;
+      record.costing = record.hours * record.rate;
+    }
+    
+    const revenue = records.reduce((sum, r) => sum + (r.total_amount || 0), 0);
+    const cost = records.reduce((sum, r) => sum + (r.costing || 0), 0);
+    
+    res.json({
+      revenue,
+      cost,
+      profit: revenue - cost
+    });
+    
+  } catch (err) {
+    console.error('Get totals error:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
 
-    const currentMonth = new Date().getUTCMonth() + 1;
-    const currentYear = new Date().getUTCFullYear();
-    const createdBillings = [];
+// ═══════════════════════════════════════════════════════════════
+// EXPORT TO EXCEL
+// ═══════════════════════════════════════════════════════════════
 
-    for (const subId of resource.assigned_subprojects || []) {
-      const sub = await Subproject.findById(subId).lean();
-      if (!sub) continue;
+router.get('/export/:client', async (req, res) => {
+  try {
+    const { client } = req.params;
+    const { month, year, project_id, subproject_id } = req.query;
+    
+    const monthNum = parseInt(month) || new Date().getMonth() + 1;
+    const yearNum = parseInt(year) || new Date().getFullYear();
+    
+    const filters = { project_id, subproject_id };
+    
+    let records = [];
+    if (client.toLowerCase() === 'verisma') {
+      records = await getVerismaBillingData(monthNum, yearNum, filters);
+    } else if (client.toLowerCase() === 'mro') {
+      records = await getMROBillingData(monthNum, yearNum, filters);
+    }
+    
+    // Enrich
+    for (const record of records) {
+      const resource = await Resource.findById(record.resource_id).lean();
+      const subproject = await Subproject.findById(record.subproject_id).lean();
+      
+      record.resource_role = resource?.role || 'Associate';
+      record.flatrate = subproject?.flatrate || record.flatrate || 0;
+      
+      let costRate = 0;
+      if (resource?.assignments) {
+        for (const assignment of resource.assignments) {
+          if (assignment.client_name?.toLowerCase() === client.toLowerCase()) {
+            costRate = assignment.default_rate || 0;
+            break;
+          }
+        }
+      }
+      record.rate = costRate;
+      record.hours = record.cases * 0.5;
+      record.costing = record.hours * record.rate;
+      record.profit = record.total_amount - record.costing;
+    }
+    
+    // Create Excel
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet(`${client} Billing`);
+    
+    // Headers
+    const headers = [
+      'Process Type', 'Location', 'Resource', 'Role',
+      client === 'verisma' ? 'Request Type' : 'Requestor Type',
+      'Cases', 'Hours', 'Cost Rate ($)', 'Costing ($)',
+      'Flat Rate ($)', 'Revenue ($)', 'Profit ($)'
+    ];
+    
+    const headerRow = sheet.addRow(headers);
+    headerRow.font = { bold: true };
+    headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } };
+    
+    // Column widths
+    sheet.columns = [
+      { width: 15 }, { width: 25 }, { width: 20 }, { width: 12 },
+      { width: 15 }, { width: 10 }, { width: 10 }, { width: 12 },
+      { width: 12 }, { width: 12 }, { width: 12 }, { width: 12 }
+    ];
+    
+    // Data rows
+    records.forEach(r => {
+      sheet.addRow([
+        r.project_name || '',
+        r.subproject_name || '',
+        r.resource_name || '',
+        r.resource_role || '',
+        r.request_type || r.requestor_type || '',
+        r.cases || 0,
+        (r.hours || 0).toFixed(2),
+        (r.rate || 0).toFixed(2),
+        (r.costing || 0).toFixed(2),
+        (r.flatrate || 0).toFixed(2),
+        (r.total_amount || 0).toFixed(2),
+        (r.profit || 0).toFixed(2)
+      ]);
+    });
+    
+    // Totals row
+    const totals = records.reduce((acc, r) => ({
+      cases: acc.cases + (r.cases || 0),
+      hours: acc.hours + (r.hours || 0),
+      costing: acc.costing + (r.costing || 0),
+      revenue: acc.revenue + (r.total_amount || 0),
+      profit: acc.profit + (r.profit || 0)
+    }), { cases: 0, hours: 0, costing: 0, revenue: 0, profit: 0 });
+    
+    const totalRow = sheet.addRow([
+      'TOTAL', '', '', '', '',
+      totals.cases,
+      totals.hours.toFixed(2),
+      '',
+      totals.costing.toFixed(2),
+      '',
+      totals.revenue.toFixed(2),
+      totals.profit.toFixed(2)
+    ]);
+    totalRow.font = { bold: true };
+    totalRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF2CC' } };
+    
+    // Response
+    const monthName = new Date(yearNum, monthNum - 1).toLocaleString('default', { month: 'long' });
+    const filename = `${client}_Billing_${monthName}_${yearNum}.xlsx`;
+    
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    
+    await workbook.xlsx.write(res);
+    res.end();
+    
+  } catch (err) {
+    console.error('Export error:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
 
-      const projectId = sub.project_id;
-      const project = await Project.findById(projectId);
-      if (!project) continue;
+// ═══════════════════════════════════════════════════════════════
+// SYNC ALLOCATIONS TO BILLING MODEL
+// ═══════════════════════════════════════════════════════════════
 
-      // Get request types for this subproject
-      const requestTypes = await SubprojectRequestType.find({ subproject_id: subId }).lean();
-
-      // Get medium rate
-      const productivityRate = await Productivity.findOne({
-        subproject_id: subId,
-        level: 'medium'
-      }).lean();
-      const mediumRate = productivityRate?.base_rate || 0;
-
-      // Create billing for each request type (or one with null if none defined)
-      const typesToCreate = requestTypes.length > 0 
-        ? requestTypes.map(rt => rt.name)
-        : [null];
-
-      for (const reqType of typesToCreate) {
+router.post('/sync/:client', async (req, res) => {
+  try {
+    const { client } = req.params;
+    const { month, year, dry_run = false } = req.body;
+    
+    const monthNum = parseInt(month) || new Date().getMonth() + 1;
+    const yearNum = parseInt(year) || new Date().getFullYear();
+    
+    let records = [];
+    if (client.toLowerCase() === 'verisma') {
+      records = await getVerismaBillingData(monthNum, yearNum, {});
+    } else if (client.toLowerCase() === 'mro') {
+      records = await getMROBillingData(monthNum, yearNum, {});
+    }
+    
+    if (dry_run) {
+      return res.json({
+        success: true,
+        dry_run: true,
+        would_sync: records.length,
+        records: records.slice(0, 10) // Preview first 10
+      });
+    }
+    
+    let syncedCount = 0;
+    let errorCount = 0;
+    
+    for (const record of records) {
+      try {
+        const resource = await Resource.findById(record.resource_id).lean();
+        const subproject = await Subproject.findById(record.subproject_id).lean();
+        
+        let costRate = 0;
+        if (resource?.assignments) {
+          for (const assignment of resource.assignments) {
+            if (assignment.client_name?.toLowerCase() === client.toLowerCase()) {
+              costRate = assignment.default_rate || 0;
+              break;
+            }
+          }
+        }
+        
         const filter = {
-          project_id: projectId,
-          subproject_id: subId,
-          resource_id,
-          request_type: reqType,
-          month: currentMonth,
-          year: currentYear
+          resource_id: record.resource_id,
+          subproject_id: record.subproject_id,
+          request_type: record.request_type || record.requestor_type || null,
+          month: monthNum,
+          year: yearNum
         };
-
+        
+        const hours = record.cases * 0.5;
+        const costing = hours * costRate;
+        const flatrate = subproject?.flatrate || record.flatrate || 0;
+        const totalAmount = record.cases * flatrate;
+        
         const updateData = {
-          $setOnInsert: {
-            project_id: projectId,
-            subproject_id: subId,
-            resource_id,
-            request_type: reqType,
-            month: currentMonth,
-            year: currentYear,
-            resource_name: resource.name,
-            resource_role: resource.role,
-            project_name: project.name,
-            subproject_name: sub.name,
-            productivity_level: 'Medium',
-            hours: 0,
-            rate: mediumRate,
-            flatrate: sub.flatrate || 0,
-            total_amount: 0,
-            costing: 0,
+          $set: {
+            geography_id: record.geography_id,
+            client_id: record.client_id,
+            project_id: record.project_id,
+            geography_name: record.geography_name,
+            client_name: record.client_name,
+            project_name: record.project_name,
+            subproject_name: record.subproject_name,
+            resource_name: record.resource_name,
+            resource_email: record.resource_email,
+            resource_role: resource?.role || 'Associate',
+            cases: record.cases,
+            hours: hours,
+            rate: costRate,
+            flatrate: flatrate,
+            costing: costing,
+            total_amount: totalAmount,
+            profit: totalAmount - costing,
             billable_status: 'Billable',
-            description: `Auto-generated billing for ${sub.name}${reqType ? ' - ' + reqType : ''}`
+            sync_source: `${client.toLowerCase()}_daily_allocation`,
+            last_synced_at: new Date(),
+            allocation_entry_count: record.entry_count,
+            working_days: record.working_days
           }
         };
-
-        const result = await Billing.findOneAndUpdate(filter, updateData, {
-          upsert: true,
-          new: true
-        });
-
-        createdBillings.push(result);
+        
+        await Billing.findOneAndUpdate(filter, updateData, { upsert: true });
+        syncedCount++;
+        
+      } catch (err) {
+        console.error('Sync error for record:', err.message);
+        errorCount++;
       }
     }
-
-    res.json({ 
-      message: `Generated ${createdBillings.length} billing records`,
-      billings: createdBillings 
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ================= UPDATE billing =================
-router.put('/:billing_id', async (req, res) => {
-  try {
-    const { billing_id } = req.params;
-
-    const billing = await Billing.findById(billing_id);
-    if (!billing) {
-      return res.status(404).json({ message: 'Billing not found' });
-    }
-
-    const { hours, flatrate, rate, productivity_level, request_type, ...rest } = req.body;
-
-    Object.assign(billing, rest);
-
-    if (request_type !== undefined) {
-      billing.request_type = request_type;
-    }
-
-    if (productivity_level) {
-      billing.productivity_level = productivity_level;
-      const productivityRate = await Productivity.findOne({
-        subproject_id: billing.subproject_id,
-        level: productivity_level.toLowerCase()
-      }).lean();
-      if (productivityRate) {
-        billing.rate = productivityRate.base_rate;
-      }
-    }
-
-    if (typeof hours !== 'undefined') billing.hours = Number(hours) || 0;
-    if (typeof flatrate !== 'undefined') billing.flatrate = Number(flatrate) || 0;
-
-    billing.total_amount = (billing.hours || 0) * (billing.flatrate || 0);
-    billing.costing = (billing.hours || 0) * (billing.rate || 0);
-
-    await billing.save();
-
-    res.status(200).json(billing);
-  } catch (err) {
-    console.error('Billing update failed:', err);
-    res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
-// ================= DELETE billing =================
-router.delete('/:billing_id', async (req, res) => {
-  try {
-    const billing = await Billing.findById(req.params.billing_id);
-    if (!billing) return res.status(404).json({ message: 'Billing not found' });
-
-    await billing.deleteOne();
-
-    res.json({ message: 'Billing deleted successfully', success: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ================= SUMMARY =================
-router.get('/summary', async (req, res) => {
-  try {
-    const { month, year, project_id, request_type } = req.query;
-
-    const filters = {};
-    if (month) filters.month = parseInt(month);
-    if (year) filters.year = parseInt(year);
-    if (project_id) filters.project_id = project_id;
-    if (request_type) filters.request_type = request_type;
-
-    const billings = await Billing.find(filters);
-
-    const totalBillable = billings.filter(b => b.billable_status === 'Billable')
-      .reduce((acc, b) => acc + (b.total_amount || 0), 0);
-
-    const totalNonBillable = billings.filter(b => b.billable_status === 'Non-Billable')
-      .reduce((acc, b) => acc + (b.total_amount || 0), 0);
-
-    const totalBillableHours = billings.filter(b => b.billable_status === 'Billable')
-      .reduce((acc, b) => acc + (b.hours || 0), 0);
-
-    const totalNonBillableHours = billings.filter(b => b.billable_status === 'Non-Billable')
-      .reduce((acc, b) => acc + (b.hours || 0), 0);
-
-    // Group by request type
-    const byRequestType = {};
-    billings.forEach(b => {
-      const rt = b.request_type || 'Unspecified';
-      if (!byRequestType[rt]) {
-        byRequestType[rt] = { hours: 0, amount: 0, count: 0 };
-      }
-      byRequestType[rt].hours += b.hours || 0;
-      byRequestType[rt].amount += b.total_amount || 0;
-      byRequestType[rt].count += 1;
-    });
-
+    
     res.json({
-      client_billable_total: totalBillable,
-      internal_cost: totalNonBillable,
-      grand_total: totalBillable + totalNonBillable,
-      billable_hours: totalBillableHours,
-      non_billable_hours: totalNonBillableHours,
-      total_hours: totalBillableHours + totalNonBillableHours,
-      record_count: billings.length,
-      by_request_type: byRequestType
+      success: true,
+      synced: syncedCount,
+      errors: errorCount,
+      total: records.length
     });
+    
   } catch (err) {
-    console.error(err);
+    console.error('Sync error:', err);
     res.status(500).json({ message: err.message });
   }
 });
 
-// ================= CALCULATE billing =================
-router.post('/calculate', async (req, res) => {
+// ═══════════════════════════════════════════════════════════════
+// GET SYNC STATUS
+// ═══════════════════════════════════════════════════════════════
+
+router.get('/sync-status', async (req, res) => {
   try {
-    const { project_id, subproject_id, resource_id, productivity_level, hours, rate } = req.body;
-
-    let finalRate = rate || 0;
-    if (subproject_id && productivity_level) {
-      const prod = await Productivity.findOne({
-        subproject_id,
-        level: productivity_level.toLowerCase()
-      });
-      if (prod) finalRate = prod.base_rate || finalRate;
-    }
-
-    const total = (hours || 0) * finalRate;
-    const formula = `$${finalRate.toFixed(2)} × ${hours || 0} hours = $${total.toFixed(2)}`;
-
-    res.json({ total, rate: finalRate, hours: hours || 0, formula });
+    const { month, year } = req.query;
+    const monthNum = parseInt(month) || new Date().getMonth() + 1;
+    const yearNum = parseInt(year) || new Date().getFullYear();
+    
+    const startDate = new Date(yearNum, monthNum - 1, 1);
+    const endDate = new Date(yearNum, monthNum, 0, 23, 59, 59, 999);
+    
+    const [verismaCount, mroCount, billingCount, lastSync] = await Promise.all([
+      VerismaDailyAllocation.countDocuments({
+        allocation_date: { $gte: startDate, $lte: endDate },
+        is_deleted: { $ne: true }
+      }),
+      MRODailyAllocation.countDocuments({
+        allocation_date: { $gte: startDate, $lte: endDate },
+        is_deleted: { $ne: true }
+      }),
+      Billing.countDocuments({ month: monthNum, year: yearNum }),
+      Billing.findOne({ month: monthNum, year: yearNum, last_synced_at: { $exists: true } })
+        .sort({ last_synced_at: -1 })
+        .select('last_synced_at')
+        .lean()
+    ]);
+    
+    res.json({
+      month: monthNum,
+      year: yearNum,
+      allocations: {
+        verisma: verismaCount,
+        mro: mroCount,
+        total: verismaCount + mroCount
+      },
+      billing_records: billingCount,
+      last_synced_at: lastSync?.last_synced_at || null,
+      needs_sync: billingCount === 0 && (verismaCount + mroCount) > 0
+    });
+    
   } catch (err) {
-    console.error(err);
+    console.error('Sync status error:', err);
     res.status(500).json({ message: err.message });
   }
 });

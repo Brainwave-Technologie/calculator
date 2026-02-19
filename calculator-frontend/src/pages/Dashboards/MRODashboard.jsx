@@ -1,725 +1,717 @@
 // pages/dashboards/MRODashboard.jsx - MRO CLIENT DASHBOARD
-// Updated to fetch from resource-logged daily allocations
-// Processing: NRS-NO Records ($2.25) + Manual ($3.00) by Location
-// Logging: Flat rate $1.08 per case
+// Clean UI, Fixed filters, Process type dropdown, Integrated detailed entries
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { toast } from 'react-hot-toast';
 
 const apiBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000/api';
 
-// =============================================
-// MRO PRICING CONSTANTS
-// =============================================
-const MRO_PRICING = {
-  PROCESSING: {
-    'NRS-NO Records': 2.25,
-    'Manual': 3.00
-  },
-  LOGGING: 1.08
+// Color palette for dynamic columns
+const COLUMN_COLORS = [
+  { bg: 'bg-teal-50', header: 'bg-teal-100', text: 'text-teal-700', border: 'border-teal-500' },
+  { bg: 'bg-blue-50', header: 'bg-blue-100', text: 'text-blue-700', border: 'border-blue-500' },
+  { bg: 'bg-purple-50', header: 'bg-purple-100', text: 'text-purple-700', border: 'border-purple-500' },
+  { bg: 'bg-orange-50', header: 'bg-orange-100', text: 'text-orange-700', border: 'border-orange-500' },
+  { bg: 'bg-pink-50', header: 'bg-pink-100', text: 'text-pink-700', border: 'border-pink-500' },
+  { bg: 'bg-indigo-50', header: 'bg-indigo-100', text: 'text-indigo-700', border: 'border-indigo-500' },
+  { bg: 'bg-cyan-50', header: 'bg-cyan-100', text: 'text-cyan-700', border: 'border-cyan-500' },
+  { bg: 'bg-amber-50', header: 'bg-amber-100', text: 'text-amber-700', border: 'border-amber-500' },
+];
+
+const RequestTypeBadge = ({ type }) => {
+  if (!type) return <span className="text-gray-400 text-xs">—</span>;
+  const colors = {
+    'New Request': 'bg-green-100 text-green-700',
+    'Key': 'bg-yellow-100 text-yellow-700',
+    'Duplicate': 'bg-orange-100 text-orange-700',
+    'Follow up': 'bg-blue-100 text-blue-700',
+    'Batch': 'bg-purple-100 text-purple-700',
+    'NRS-NO Records': 'bg-teal-100 text-teal-700',
+    'Manual': 'bg-amber-100 text-amber-700'
+  };
+  return <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${colors[type] || 'bg-gray-100 text-gray-700'}`}>{type}</span>;
 };
 
-// =============================================
-// HELPER COMPONENTS
-// =============================================
-const Loader = ({ message = "Loading..." }) => (
-  <div className="flex flex-col items-center py-10">
-    <div className="w-8 h-8 border-3 border-green-600 border-t-transparent rounded-full animate-spin"></div>
-    <p className="mt-3 text-sm text-gray-500">{message}</p>
-  </div>
-);
-
-// =============================================
-// MAIN MRO DASHBOARD COMPONENT
-// =============================================
 const MRODashboard = () => {
-  // State
   const [activeView, setActiveView] = useState('processing');
   const [isLoading, setIsLoading] = useState(false);
   const [filters, setFilters] = useState({
     geography_id: '',
-    month: 'all',
+    month: (new Date().getMonth() + 1).toString(),
     year: new Date().getFullYear().toString(),
-    startDate: '',
-    endDate: '',
-    resource_id: '',
-    subproject_id: ''
+    resource_email: '',
+    subproject_id: '',
+    process_type: '' // Added process type filter
   });
+  
+  // Master data
   const [geographies, setGeographies] = useState([]);
-  const [resources, setResources] = useState([]);
+  const [allResources, setAllResources] = useState([]); // ALL resources
+  const [mroResources, setMroResources] = useState([]); // Filtered MRO resources
+  const [subprojects, setSubprojects] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   
-  // Data states
+  // Summary Data
   const [allocations, setAllocations] = useState([]);
   const [processingSummary, setProcessingSummary] = useState([]);
   const [loggingSummary, setLoggingSummary] = useState([]);
   const [processingTotals, setProcessingTotals] = useState(null);
   const [loggingTotals, setLoggingTotals] = useState(null);
+  const [allTypes, setAllTypes] = useState([]);
+  const [loggingTypes, setLoggingTypes] = useState([]);
+  
+  // Detailed Entries
+  const [showDetailed, setShowDetailed] = useState(true);
+  const [detailedData, setDetailedData] = useState([]);
+  const [detailedPage, setDetailedPage] = useState(1);
+  const [detailedPages, setDetailedPages] = useState(1);
+  const [detailedTotal, setDetailedTotal] = useState(0);
+  const [detailedLoading, setDetailedLoading] = useState(false);
+  const [detailedSearch, setDetailedSearch] = useState('');
   
   const [sortConfig, setSortConfig] = useState({ key: 'location', direction: 'asc' });
-  const [pagination, setPagination] = useState({
-    currentPage: 1,
-    totalPages: 1,
-    totalItems: 0,
-    itemsPerPage: 100
-  });
 
-  // Helpers
-  const formatCurrency = (amount) => 
-    new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(amount || 0);
+  const formatCurrency = (amt) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(amt || 0);
+  const formatNumber = (num) => new Intl.NumberFormat('en-US').format(num || 0);
+  const formatDate = (date) => date ? new Date(date).toLocaleDateString('en-US', { month: 'short', day: '2-digit' }) : '—';
+  const getAuthToken = () => localStorage.getItem('token') || sessionStorage.getItem('token');
+  const getColumnColor = (idx) => COLUMN_COLORS[idx % COLUMN_COLORS.length];
 
-  const formatNumber = (num) => 
-    new Intl.NumberFormat('en-US').format(num || 0);
-
-  const formatDate = (dateString) => {
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  };
-
-  // Get auth token
-  const getAuthToken = () => {
-    return localStorage.getItem('token') || sessionStorage.getItem('token');
-  };
-
-  // Fetch geographies on mount
+  // Fetch geographies
   useEffect(() => {
-    const fetchGeographies = async () => {
+    const fetchGeo = async () => {
       try {
-        const response = await fetch(`${apiBaseUrl}/geography`);
-        const data = await response.json();
-        setGeographies(Array.isArray(data) ? data : data.geographies || []);
-      } catch (error) {
-        console.error('Error fetching geographies:', error);
-      }
+        const res = await fetch(`${apiBaseUrl}/geography`);
+        const data = await res.json();
+        setGeographies(Array.isArray(data) ? data : data.geographies || data.data || []);
+      } catch (e) { console.error(e); }
     };
-    fetchGeographies();
+    fetchGeo();
   }, []);
 
-  // Fetch resources for filter dropdown
+  // Fetch ALL resources (handle pagination) and filter for MRO - FIXED
   useEffect(() => {
-    const fetchResources = async () => {
+    const fetchAllResources = async () => {
       try {
         const token = getAuthToken();
-        const response = await fetch(`${apiBaseUrl}/resource`, {
-          headers: {
-            'Authorization': `Bearer ${token}`
+        let allResourcesList = [];
+        let page = 1;
+        let hasMore = true;
+        
+        // Fetch all pages of resources
+        while (hasMore) {
+          const res = await fetch(`${apiBaseUrl}/resource?page=${page}&limit=100`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          const data = await res.json();
+          
+          const pageResources = data.resources || data.data || data || [];
+          allResourcesList = [...allResourcesList, ...pageResources];
+          
+          // Check if there are more pages
+          if (data.pagination) {
+            hasMore = data.pagination.hasMore || page < data.pagination.totalPages;
+          } else if (data.pages) {
+            hasMore = page < data.pages;
+          } else {
+            hasMore = false; // No pagination info, assume single page
           }
+          page++;
+          
+          // Safety limit
+          if (page > 20) break;
+        }
+        
+        setAllResources(allResourcesList);
+        
+        // Filter MRO resources - check all possible assignment structures
+        const mro = allResourcesList.filter(r => {
+          // Check assignments array
+          if (r.assignments?.length > 0) {
+            return r.assignments.some(a => 
+              a.client_name?.toLowerCase() === 'mro' ||
+              a.client?.name?.toLowerCase() === 'mro'
+            );
+          }
+          // Check allocated_clients
+          if (r.allocated_clients?.length > 0) {
+            return r.allocated_clients.some(c => 
+              c.client_name?.toLowerCase() === 'mro' ||
+              c.name?.toLowerCase() === 'mro'
+            );
+          }
+          // Check direct client_name
+          return r.client_name?.toLowerCase() === 'mro';
         });
-        const data = await response.json();
-        // Filter to only MRO-assigned resources
-        const mroResources = (data.resources || data || []).filter(r => 
-          r.assignments?.some(a => a.client_name?.toLowerCase() === 'mro')
-        );
-        setResources(mroResources);
-      } catch (error) {
-        console.error('Error fetching resources:', error);
+        
+        // If no MRO resources found, show all (fallback)
+        setMroResources(mro.length > 0 ? mro : allResourcesList);
+      } catch (e) { 
+        console.error('Resource fetch error:', e);
+        setMroResources([]);
       }
     };
-    fetchResources();
+    fetchAllResources();
   }, []);
 
-  // Build date range from filters
-  const getDateRange = useCallback(() => {
-    if (filters.startDate && filters.endDate) {
-      return {
-        start_date: filters.startDate,
-        end_date: filters.endDate
-      };
-    }
-    
-    // Build from month/year
-    const year = parseInt(filters.year);
-    if (filters.month !== 'all') {
-      const month = parseInt(filters.month);
-      const startDate = new Date(year, month - 1, 1);
-      const endDate = new Date(year, month, 0);
-      return {
-        start_date: startDate.toISOString().split('T')[0],
-        end_date: endDate.toISOString().split('T')[0]
-      };
-    }
-    
-    // Full year
-    return {
-      start_date: `${year}-01-01`,
-      end_date: `${year}-12-31`
+  // Fetch subprojects - FIXED API path
+  useEffect(() => {
+    const fetchSP = async () => {
+      try {
+        const token = getAuthToken();
+        // First get MRO client
+        const clientRes = await fetch(`${apiBaseUrl}/client?search=MRO`);
+        const clients = await clientRes.json();
+        const mroClient = (Array.isArray(clients) ? clients : clients.data || []).find(c => c.name.toLowerCase() === 'mro');
+        
+        if (mroClient) {
+          // Get projects for this client first
+          const projRes = await fetch(`${apiBaseUrl}/project/client/${mroClient._id}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          const projData = await projRes.json();
+          const projectList = projData.projects || projData || [];
+          
+          // Fetch subprojects for each project
+          let allSubprojects = [];
+          for (const project of projectList) {
+            try {
+              const spRes = await fetch(`${apiBaseUrl}/project/${project._id}/subproject`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+              });
+              const spData = await spRes.json();
+              const sps = spData.data || spData || [];
+              allSubprojects = [...allSubprojects, ...sps];
+            } catch (e) {
+              console.log('Error fetching subprojects for project:', project._id);
+            }
+          }
+          
+          setSubprojects(allSubprojects);
+        }
+      } catch (e) { console.error('Subproject fetch error:', e); }
     };
-  }, [filters.startDate, filters.endDate, filters.month, filters.year]);
+    fetchSP();
+  }, []);
 
-  // Fetch all allocations from the new admin endpoint
-  const fetchAllocations = useCallback(async (page = 1) => {
+  // Fetch summary allocations
+  const fetchAllocations = useCallback(async () => {
     setIsLoading(true);
-    
     try {
       const token = getAuthToken();
-      const dateRange = getDateRange();
-      
       const params = new URLSearchParams({
-        start_date: dateRange.start_date,
-        end_date: dateRange.end_date,
-        page: page.toString(),
-        limit: '100'
+        month: filters.month,
+        year: filters.year,
+        limit: '1000',
+        process_type: filters.process_type || (activeView === 'processing' ? 'Processing' : 'Logging')
       });
 
-      if (filters.resource_id) params.append('resource_id', filters.resource_id);
-      if (filters.subproject_id) params.append('subproject_id', filters.subproject_id);
-      if (activeView === 'processing') {
-        params.append('process_type', 'Processing');
-      } else {
-        params.append('process_type', 'Logging');
-      }
+      if (filters.resource_email) params.append('resource_email', filters.resource_email);
+      if (filters.subproject_id) params.append('subproject_key', filters.subproject_id);
 
-      const response = await fetch(`${apiBaseUrl}/mro-daily-allocations/admin/all?${params}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        }
+      const res = await fetch(`${apiBaseUrl}/mro-daily-allocations/admin/all?${params}`, {
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
       });
 
-      if (!response.ok) {
-        throw new Error('Failed to fetch allocations');
-      }
-
-      const data = await response.json();
+      if (!res.ok) throw new Error('Failed to fetch');
+      const data = await res.json();
       setAllocations(data.allocations || []);
-      setPagination(data.pagination || {
-        currentPage: 1,
-        totalPages: 1,
-        totalItems: 0,
-        itemsPerPage: 100
-      });
-
-      // Process allocations into summary format
-      processAllocationsIntoSummary(data.allocations || []);
-
-    } catch (error) {
-      console.error("Error loading allocations:", error);
-      toast.error(error.message || 'Failed to load allocation data');
+      processIntoSummary(data.allocations || []);
+    } catch (e) {
+      console.error(e);
+      toast.error('Failed to load data');
       setAllocations([]);
     } finally {
       setIsLoading(false);
     }
-  }, [filters, activeView, getDateRange]);
+  }, [filters, activeView]);
 
-  // Process raw allocations into location-based summary
-  const processAllocationsIntoSummary = useCallback((allocs) => {
-    if (activeView === 'processing') {
-      // Group by location for processing
-      const locationMap = new Map();
-      
-      allocs.forEach(alloc => {
-        const key = alloc.subproject_name || alloc.subproject_id;
-        if (!locationMap.has(key)) {
-          locationMap.set(key, {
-            location: alloc.subproject_name,
-            subproject_id: alloc.subproject_id,
-            geography_name: alloc.geography_name,
-            nrsNoRecords: 0,
-            nrsNoTotal: 0,
-            manual: 0,
-            manualTotal: 0,
-            totalBilling: 0,
-            grandTotal: 0
-          });
-        }
-        
-        const entry = locationMap.get(key);
-        
-        if (alloc.requestor_type === 'NRS-NO Records') {
-          entry.nrsNoRecords += 1;
-          entry.nrsNoTotal += alloc.billing_amount || MRO_PRICING.PROCESSING['NRS-NO Records'];
-        } else if (alloc.requestor_type === 'Manual') {
-          entry.manual += 1;
-          entry.manualTotal += alloc.billing_amount || MRO_PRICING.PROCESSING['Manual'];
-        }
-        
-        entry.grandTotal = entry.nrsNoRecords + entry.manual;
-        entry.totalBilling = entry.nrsNoTotal + entry.manualTotal;
+  // Fetch detailed entries
+  const fetchDetailed = useCallback(async (page = 1) => {
+    setDetailedLoading(true);
+    try {
+      const token = getAuthToken();
+      const params = new URLSearchParams({
+        month: filters.month,
+        year: filters.year,
+        page: page.toString(),
+        limit: '20',
+        process_type: filters.process_type || (activeView === 'processing' ? 'Processing' : 'Logging')
       });
 
-      const summaryData = Array.from(locationMap.values());
-      
-      // Apply search filter
-      const filtered = searchTerm 
-        ? summaryData.filter(row => 
-            row.location?.toLowerCase().includes(searchTerm.toLowerCase())
-          )
-        : summaryData;
+      if (filters.resource_email) params.append('resource_email', filters.resource_email);
+      if (filters.subproject_id) params.append('subproject_key', filters.subproject_id);
+      if (detailedSearch) params.append('search', detailedSearch);
 
-      // Apply geography filter
-      const geoFiltered = filters.geography_id
-        ? filtered.filter(row => {
-            const geo = geographies.find(g => g._id === filters.geography_id);
-            return geo && row.geography_name?.toLowerCase() === geo.name?.toLowerCase();
-          })
-        : filtered;
-
-      setProcessingSummary(geoFiltered);
-
-      // Calculate totals
-      const totals = geoFiltered.reduce((acc, row) => ({
-        nrsNoRecords: acc.nrsNoRecords + row.nrsNoRecords,
-        nrsNoTotal: acc.nrsNoTotal + row.nrsNoTotal,
-        manual: acc.manual + row.manual,
-        manualTotal: acc.manualTotal + row.manualTotal,
-        totalBilling: acc.totalBilling + row.totalBilling,
-        grandTotal: acc.grandTotal + row.grandTotal
-      }), { nrsNoRecords: 0, nrsNoTotal: 0, manual: 0, manualTotal: 0, totalBilling: 0, grandTotal: 0 });
-
-      setProcessingTotals(totals);
-
-    } else {
-      // Logging summary - simpler, just count cases
-      const totalCases = allocs.length;
-      const totalBilling = allocs.reduce((sum, a) => sum + (a.billing_amount || MRO_PRICING.LOGGING), 0);
-
-      setLoggingSummary(allocs);
-      setLoggingTotals({
-        totalCases,
-        totalBilling
+      const res = await fetch(`${apiBaseUrl}/mro-daily-allocations/admin/all?${params}`, {
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
       });
+
+      if (!res.ok) throw new Error('Failed to fetch');
+      const data = await res.json();
+      setDetailedData(data.allocations || []);
+      setDetailedPage(data.page || 1);
+      setDetailedPages(data.pages || 1);
+      setDetailedTotal(data.total || 0);
+    } catch (e) {
+      console.error(e);
+      setDetailedData([]);
+    } finally {
+      setDetailedLoading(false);
     }
-  }, [activeView, searchTerm, filters.geography_id, geographies]);
+  }, [filters, activeView, detailedSearch]);
 
-  // Fetch data when filters/view change
+  // Process into summary
+  const processIntoSummary = useCallback((allocs) => {
+    let filtered = allocs;
+    if (filters.geography_id) {
+      const geo = geographies.find(g => g._id === filters.geography_id);
+      if (geo) filtered = allocs.filter(a => a.geography_name?.toLowerCase() === geo.name?.toLowerCase());
+    }
+
+    const processType = filters.process_type || (activeView === 'processing' ? 'Processing' : 'Logging');
+
+    if (processType === 'Processing' || activeView === 'processing') {
+      const typeSet = new Set();
+      filtered.filter(a => a.process_type === 'Processing').forEach(a => {
+        if (a.requestor_type) typeSet.add(a.requestor_type);
+        if (a.request_type) typeSet.add(a.request_type);
+      });
+      setAllTypes(Array.from(typeSet).sort());
+
+      const locMap = new Map();
+      filtered.forEach(a => {
+        if (a.process_type !== 'Processing') return;
+        const key = a.subproject_id?.toString() || a.subproject_name;
+        if (!locMap.has(key)) {
+          locMap.set(key, { location: a.subproject_name, byType: {}, totalCases: 0, totalBilling: 0 });
+        }
+        const entry = locMap.get(key);
+        const typeKey = a.requestor_type || a.request_type || 'Other';
+        if (!entry.byType[typeKey]) entry.byType[typeKey] = { cases: 0, rate: a.billing_rate || 0, total: 0 };
+        entry.byType[typeKey].cases += 1;
+        entry.byType[typeKey].total += a.billing_amount || a.billing_rate || 0;
+        if (a.billing_rate > 0) entry.byType[typeKey].rate = a.billing_rate;
+        entry.totalCases += 1;
+        entry.totalBilling += a.billing_amount || a.billing_rate || 0;
+      });
+
+      let summary = Array.from(locMap.values());
+      if (searchTerm) summary = summary.filter(r => r.location?.toLowerCase().includes(searchTerm.toLowerCase()));
+      setProcessingSummary(summary);
+
+      const totals = { byType: {}, totalBilling: 0, grandTotal: 0 };
+      Array.from(typeSet).forEach(t => { totals.byType[t] = { cases: 0, total: 0 }; });
+      summary.forEach(r => {
+        Array.from(typeSet).forEach(t => {
+          if (r.byType[t]) {
+            totals.byType[t].cases += r.byType[t].cases;
+            totals.byType[t].total += r.byType[t].total;
+          }
+        });
+        totals.totalBilling += r.totalBilling;
+        totals.grandTotal += r.totalCases;
+      });
+      setProcessingTotals(totals);
+    }
+
+    if (processType === 'Logging' || activeView === 'logging') {
+      const loggingAllocs = filtered.filter(a => a.process_type === 'Logging');
+      const typeSet = new Set();
+      loggingAllocs.forEach(a => { if (a.request_type) typeSet.add(a.request_type); });
+      setLoggingTypes(Array.from(typeSet).sort());
+
+      const locMap = new Map();
+      loggingAllocs.forEach(a => {
+        const key = a.subproject_id?.toString() || a.subproject_name;
+        if (!locMap.has(key)) {
+          locMap.set(key, { location: a.subproject_name, flatrate: a.billing_rate || 1.08, byType: {}, totalCases: 0, totalBilling: 0 });
+        }
+        const entry = locMap.get(key);
+        const typeKey = a.request_type || 'Other';
+        if (!entry.byType[typeKey]) entry.byType[typeKey] = { cases: 0, total: 0 };
+        entry.byType[typeKey].cases += 1;
+        entry.byType[typeKey].total += a.billing_amount || a.billing_rate || 1.08;
+        entry.totalCases += 1;
+        entry.totalBilling += a.billing_amount || a.billing_rate || 1.08;
+        if (a.billing_rate > 0) entry.flatrate = a.billing_rate;
+      });
+
+      let summary = Array.from(locMap.values());
+      if (searchTerm) summary = summary.filter(r => r.location?.toLowerCase().includes(searchTerm.toLowerCase()));
+      setLoggingSummary(summary);
+
+      const totals = { byType: {}, totalCases: 0, totalBilling: 0 };
+      Array.from(typeSet).forEach(t => { totals.byType[t] = { cases: 0, total: 0 }; });
+      summary.forEach(r => {
+        Array.from(typeSet).forEach(t => {
+          if (r.byType[t]) {
+            totals.byType[t].cases += r.byType[t].cases;
+            totals.byType[t].total += r.byType[t].total;
+          }
+        });
+        totals.totalCases += r.totalCases;
+        totals.totalBilling += r.totalBilling;
+      });
+      setLoggingTotals(totals);
+    }
+  }, [activeView, searchTerm, filters.geography_id, filters.process_type, geographies]);
+
   useEffect(() => {
-    const timer = setTimeout(() => {
-      fetchAllocations(1);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [filters, searchTerm, activeView, fetchAllocations]);
+    if (allocations.length > 0) processIntoSummary(allocations);
+  }, [searchTerm, filters.geography_id, processIntoSummary]);
 
-  // Handle filter changes
+  useEffect(() => {
+    const t = setTimeout(() => { fetchAllocations(); fetchDetailed(1); }, 300);
+    return () => clearTimeout(t);
+  }, [filters.month, filters.year, filters.resource_email, filters.subproject_id, filters.process_type, activeView, fetchAllocations, fetchDetailed]);
+
+  useEffect(() => {
+    const t = setTimeout(() => fetchDetailed(1), 500);
+    return () => clearTimeout(t);
+  }, [detailedSearch, fetchDetailed]);
+
   const handleFilterChange = (e) => {
     const { id, value } = e.target;
     setFilters(prev => ({ ...prev, [id]: value }));
   };
 
-  // Sorting
   const handleSort = (key) => {
-    setSortConfig(prev => ({
-      key,
-      direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
-    }));
+    setSortConfig(prev => ({ key, direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc' }));
   };
 
-  const sortedProcessingData = [...processingSummary].sort((a, b) => {
-    const aVal = a[sortConfig.key];
-    const bVal = b[sortConfig.key];
-    if (typeof aVal === 'string') {
-      return sortConfig.direction === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-    }
-    return sortConfig.direction === 'asc' ? aVal - bVal : bVal - aVal;
-  });
+  const sortedProcessing = useMemo(() => {
+    return [...processingSummary].sort((a, b) => {
+      let aVal = sortConfig.key === 'location' ? a.location : (a[sortConfig.key] || a.byType[sortConfig.key]?.cases || 0);
+      let bVal = sortConfig.key === 'location' ? b.location : (b[sortConfig.key] || b.byType[sortConfig.key]?.cases || 0);
+      if (typeof aVal === 'string') return sortConfig.direction === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      return sortConfig.direction === 'asc' ? aVal - bVal : bVal - aVal;
+    });
+  }, [processingSummary, sortConfig]);
 
-  // Export to CSV
-  const exportToCSV = async () => {
-    const loadingToast = toast.loading('Preparing export...');
-    
-    try {
-      let headers, rows;
+  const sortedLogging = useMemo(() => {
+    return [...loggingSummary].sort((a, b) => {
+      let aVal = sortConfig.key === 'location' ? a.location : (a[sortConfig.key] || a.byType[sortConfig.key]?.cases || 0);
+      let bVal = sortConfig.key === 'location' ? b.location : (b[sortConfig.key] || b.byType[sortConfig.key]?.cases || 0);
+      if (typeof aVal === 'string') return sortConfig.direction === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      return sortConfig.direction === 'asc' ? aVal - bVal : bVal - aVal;
+    });
+  }, [loggingSummary, sortConfig]);
 
-      if (activeView === 'processing') {
-        if (processingSummary.length === 0) {
-          toast.dismiss(loadingToast);
-          toast.error('No data to export');
-          return;
-        }
+  const exportCSV = () => {
+    const data = activeView === 'processing' ? sortedProcessing : sortedLogging;
+    const types = activeView === 'processing' ? allTypes : loggingTypes;
+    if (data.length === 0) { toast.error('No data'); return; }
 
-        headers = ['Sr No', 'Location', 'NRS-NO Records', 'Price per case', 'Total', 'Manual', 'Price per case', 'Total', 'Total Billing', 'Grand Total'];
-        rows = sortedProcessingData.map((row, idx) => [
-          idx + 1, row.location || '', row.nrsNoRecords || 0, '$2.25', (row.nrsNoTotal || 0).toFixed(2),
-          row.manual || 0, '$3.00', (row.manualTotal || 0).toFixed(2), (row.totalBilling || 0).toFixed(2), row.grandTotal || 0
-        ]);
+    let headers = ['Sr', 'Location'];
+    types.forEach(t => headers.push(`${t} Cases`, `${t} Total`));
+    headers.push('Total Cases', 'Total Billing');
 
-        if (processingTotals) {
-          rows.push(['', 'GRAND TOTAL', processingTotals.nrsNoRecords || 0, '', (processingTotals.nrsNoTotal || 0).toFixed(2),
-            processingTotals.manual || 0, '', (processingTotals.manualTotal || 0).toFixed(2),
-            (processingTotals.totalBilling || 0).toFixed(2), processingTotals.grandTotal || 0
-          ]);
-        }
-      } else {
-        headers = ['Details', 'Cases', 'Pricing', 'Grand Total'];
-        rows = [['MRO Logging', loggingTotals?.totalCases || 0, '$1.08', (loggingTotals?.totalBilling || 0).toFixed(2)]];
-      }
+    const rows = data.map((r, i) => {
+      const row = [i + 1, r.location];
+      types.forEach(t => { row.push(r.byType[t]?.cases || 0, (r.byType[t]?.total || 0).toFixed(2)); });
+      row.push(r.totalCases, r.totalBilling.toFixed(2));
+      return row;
+    });
 
-      const escapeCSV = (val) => {
-        if (val === null || val === undefined) return '';
-        const str = String(val);
-        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-          return `"${str.replace(/"/g, '""')}"`;
-        }
-        return str;
-      };
-
-      const csvContent = [headers.map(escapeCSV).join(','), ...rows.map(row => row.map(escapeCSV).join(','))].join('\n');
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      
-      const dateRange = filters.startDate && filters.endDate 
-        ? `${filters.startDate}-to-${filters.endDate}`
-        : `${filters.year}-${filters.month !== 'all' ? filters.month : 'all'}`;
-      
-      a.download = `mro-${activeView}-${dateRange}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
-      
-      toast.dismiss(loadingToast);
-      toast.success('Successfully exported!');
-
-    } catch (error) {
-      console.error('Export error:', error);
-      toast.dismiss(loadingToast);
-      toast.error(error.message || 'Failed to export data.');
-    }
+    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `mro-${activeView}-${filters.month}-${filters.year}.csv`;
+    a.click();
+    toast.success('Exported!');
   };
 
-  // Processing Columns Definition
-  const processingColumns = [
-    { key: 'srNo', header: 'Sr No', sortable: false, className: 'w-16' },
-    { key: 'location', header: 'Location', sortable: true, className: 'min-w-[200px]' },
-    { key: 'nrsNoRecords', header: 'NRS-NO Records', sortable: true, className: 'w-32 text-right' },
-    { key: 'nrsNoPrice', header: 'Price per case', sortable: false, className: 'w-28 text-right' },
-    { key: 'nrsNoTotal', header: 'Total', sortable: true, className: 'w-32 text-right' },
-    { key: 'manual', header: 'Manual', sortable: true, className: 'w-24 text-right' },
-    { key: 'manualPrice', header: 'Price per case', sortable: false, className: 'w-28 text-right' },
-    { key: 'manualTotal', header: 'Total', sortable: true, className: 'w-32 text-right' },
-    { key: 'totalBilling', header: 'Total Billing', sortable: true, className: 'w-36 text-right' },
-    { key: 'grandTotal', header: 'Grand Total', sortable: true, className: 'w-28 text-right' }
-  ];
+  const SortIcon = ({ col }) => (
+    <span className="text-gray-400 ml-0.5 text-[10px]">
+      {sortConfig.key === col ? (sortConfig.direction === 'asc' ? '▲' : '▼') : '◆'}
+    </span>
+  );
 
   return (
-    <div className="p-4 space-y-4">
-      {/* Header Info Banner */}
-      <div className="bg-green-50 border-l-4 border-green-500 p-4 rounded-lg shadow-sm">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="text-sm font-semibold text-green-900">MRO Resource Daily Allocations</div>
-            <div className="text-sm text-green-700">
-              Viewing data logged by resources via daily allocation entry
-            </div>
-          </div>
-          <div className="text-xs text-green-600">
-            Total Records: {formatNumber(pagination.totalItems || allocations.length)}
-          </div>
+    <div className="bg-gray-50 min-h-screen">
+      {/* Header */}
+      <div className="bg-emerald-700 text-white px-4 py-2.5 flex items-center justify-between">
+        <div>
+          <h1 className="text-base font-semibold">MRO Billing Dashboard</h1>
+          <p className="text-xs text-emerald-200">{new Date(parseInt(filters.year), parseInt(filters.month) - 1).toLocaleString('default', { month: 'long', year: 'numeric' })}</p>
+        </div>
+        <div className="flex items-center gap-4 text-xs">
+          <div><span className="text-emerald-200">Locations:</span> <span className="font-semibold">{activeView === 'processing' ? sortedProcessing.length : sortedLogging.length}</span></div>
+          <div><span className="text-emerald-200">Cases:</span> <span className="font-semibold">{formatNumber(activeView === 'processing' ? processingTotals?.grandTotal : loggingTotals?.totalCases)}</span></div>
+          <div><span className="text-emerald-200">Billing:</span> <span className="font-semibold">{formatCurrency(activeView === 'processing' ? processingTotals?.totalBilling : loggingTotals?.totalBilling)}</span></div>
         </div>
       </div>
 
-      {/* Controls Panel */}
-      <div className="bg-white rounded-xl shadow-md p-4">
-        <div className="flex items-center justify-between mb-4">
+      {/* Filters */}
+      <div className="bg-white border-b px-4 py-2">
+        <div className="flex flex-wrap items-center gap-2">
           {/* View Toggle */}
-          <div className="flex items-center space-x-3">
-            <label className="text-sm font-medium text-gray-700">View:</label>
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={() => setActiveView('processing')}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2 ${
-                  activeView === 'processing' ? 'bg-teal-600 text-white' : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
-                }`}
-              >
-                <span>📊</span>
-                <span>Processing Dashboard</span>
-              </button>
-              <button
-                onClick={() => setActiveView('logging')}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2 ${
-                  activeView === 'logging' ? 'bg-emerald-600 text-white' : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
-                }`}
-              >
-                <span>📝</span>
-                <span>Logging Dashboard</span>
-              </button>
-            </div>
-          </div>
-        </div>
-
-       
-
-        {/* Filters */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-7 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Geography</label>
-            <select id="geography_id" value={filters.geography_id} onChange={handleFilterChange} className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 min-h-[42px]">
-              <option value="">All Geographies</option>
-              {geographies.map(g => (
-                <option key={g._id} value={g._id}>{g.name}</option>
-              ))}
-            </select>
+          <div className="flex items-center gap-1 mr-2">
+            <button onClick={() => setActiveView('processing')}
+              className={`px-3 py-1.5 rounded text-xs font-medium ${activeView === 'processing' ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+              Processing
+            </button>
+            <button onClick={() => setActiveView('logging')}
+              className={`px-3 py-1.5 rounded text-xs font-medium ${activeView === 'logging' ? 'bg-emerald-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+              Logging
+            </button>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Resource</label>
-            <select id="resource_id" value={filters.resource_id} onChange={handleFilterChange} className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 min-h-[42px]">
-              <option value="">All Resources</option>
-              {resources.map(r => (
-                <option key={r._id} value={r._id}>{r.name}</option>
-              ))}
-            </select>
-          </div>
+          <span className="text-gray-300">|</span>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Month</label>
-            <select id="month" value={filters.month} onChange={handleFilterChange} className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 min-h-[42px]">
-              <option value="all">All Months</option>
-              {Array.from({ length: 12 }, (_, i) => (
-                <option key={i + 1} value={i + 1}>{new Date(0, i).toLocaleString('default', { month: 'long' })}</option>
-              ))}
-            </select>
-          </div>
+          {/* Process Type Filter */}
+          <select id="process_type" value={filters.process_type} onChange={handleFilterChange}
+            className="px-2 py-1.5 text-xs border rounded min-w-[100px]">
+            <option value="">All Process</option>
+            <option value="Processing">Processing</option>
+            <option value="Logging">Logging</option>
+          </select>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Year</label>
-            <select id="year" value={filters.year} onChange={handleFilterChange} className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 min-h-[42px]">
-              <option value="2027">2027</option>
-              <option value="2026">2026</option>
-              <option value="2025">2025</option>
-              <option value="2024">2024</option>
-            </select>
-          </div>
+          {/* Geography */}
+          <select id="geography_id" value={filters.geography_id} onChange={handleFilterChange}
+            className="px-2 py-1.5 text-xs border rounded">
+            <option value="">All Geo</option>
+            {geographies.map(g => <option key={g._id} value={g._id}>{g.name}</option>)}
+          </select>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
-            <input type="date" id="startDate" value={filters.startDate} onChange={handleFilterChange} className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 min-h-[42px]" />
-          </div>
+          {/* Resource - FIXED to show all MRO resources */}
+          <select id="resource_email" value={filters.resource_email} onChange={handleFilterChange}
+            className="px-2 py-1.5 text-xs border rounded min-w-[140px]">
+            <option value="">All Resources ({mroResources.length})</option>
+            {mroResources.map(r => (
+              <option key={r._id} value={r.email}>{r.name}</option>
+            ))}
+          </select>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
-            <input type="date" id="endDate" value={filters.endDate} onChange={handleFilterChange} className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 min-h-[42px]" />
-          </div>
+          {/* Location */}
+          <select id="subproject_id" value={filters.subproject_id} onChange={handleFilterChange}
+            className="px-2 py-1.5 text-xs border rounded min-w-[120px]">
+            <option value="">All Locations</option>
+            {subprojects.map(sp => <option key={sp._id} value={sp.business_key || sp._id}>{sp.name}</option>)}
+          </select>
 
-          {activeView === 'processing' && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Search Location</label>
-              <input type="text" placeholder="Search locations..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 focus:outline-none min-h-[42px]" />
-            </div>
-          )}
-        </div>
+          {/* Month/Year */}
+          <select id="month" value={filters.month} onChange={handleFilterChange}
+            className="px-2 py-1.5 text-xs border rounded">
+            {Array.from({ length: 12 }, (_, i) => (
+              <option key={i + 1} value={i + 1}>{new Date(0, i).toLocaleString('default', { month: 'short' })}</option>
+            ))}
+          </select>
+          <select id="year" value={filters.year} onChange={handleFilterChange}
+            className="px-2 py-1.5 text-xs border rounded">
+            {[2027, 2026, 2025, 2024].map(y => <option key={y} value={y}>{y}</option>)}
+          </select>
 
-        {/* Action Bar */}
-        <div className="flex justify-between items-center mt-4 pt-4 border-t">
-          <div className="text-sm text-gray-600">
-            {activeView === 'processing' ? (
-              <>Showing <span className="font-semibold">{sortedProcessingData.length}</span> locations</>
-            ) : (
-              <span className="font-semibold">Logging Summary</span>
-            )}
+          {/* Search */}
+          <input type="text" placeholder="Search..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
+            className="px-2 py-1.5 text-xs border rounded w-24" />
+
+          <div className="ml-auto flex items-center gap-2">
+            <button onClick={() => { fetchAllocations(); fetchDetailed(1); }} disabled={isLoading}
+              className="px-2.5 py-1.5 text-xs bg-gray-100 hover:bg-gray-200 rounded">↻</button>
+            <button onClick={exportCSV} className="px-3 py-1.5 text-xs bg-emerald-600 text-white hover:bg-emerald-700 rounded">↓ Export</button>
           </div>
-          <button onClick={exportToCSV} disabled={isLoading} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center space-x-2">
-            <span>Export CSV</span>
-          </button>
         </div>
       </div>
 
-      {/* PROCESSING VIEW */}
-      {activeView === 'processing' && (
-        <>
-          <div className="bg-white rounded-xl shadow-md overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="bg-gray-100 border-b">
-                    <th colSpan={2} className="py-2 px-3"></th>
-                    <th colSpan={3} className="py-2 px-3 text-center text-xs font-bold text-teal-600 uppercase bg-teal-50 border-l">NRS-NO Records</th>
-                    <th colSpan={3} className="py-2 px-3 text-center text-xs font-bold text-blue-600 uppercase bg-blue-50 border-l">Manual</th>
-                    <th colSpan={2} className="py-2 px-3 text-center text-xs font-bold text-green-600 uppercase bg-green-50 border-l">Totals</th>
-                  </tr>
-                  <tr className="bg-gray-50 border-b">
-                    {processingColumns.map((col) => (
-                      <th key={col.key} onClick={() => col.sortable && handleSort(col.key)} className={`py-3 px-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider ${col.className || ''} ${col.sortable ? 'cursor-pointer hover:bg-gray-100' : ''}`}>
-                        <div className="flex items-center justify-between">
-                          <span>{col.header}</span>
-                          {col.sortable && <span className="text-gray-400 ml-1">{sortConfig.key === col.key ? (sortConfig.direction === 'asc' ? '↑' : '↓') : '↕'}</span>}
-                        </div>
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200">
-                  {isLoading ? (
-                    <tr><td colSpan={processingColumns.length}><Loader message="Loading processing data..." /></td></tr>
-                  ) : sortedProcessingData.length === 0 ? (
+      <div className="p-3 space-y-3">
+        {/* Summary Table */}
+        <div className="bg-white rounded-lg shadow-sm overflow-hidden">
+          <div className="px-3 py-2 border-b bg-gray-50 flex items-center justify-between">
+            <span className="text-xs font-semibold text-gray-700">📊 Location Summary ({activeView})</span>
+          </div>
+          <div className="overflow-auto" style={{ maxHeight: '38vh' }}>
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 z-10 bg-slate-100">
+                {activeView === 'processing' ? (
+                  <>
                     <tr>
-                      <td colSpan={processingColumns.length} className="py-10 text-center">
-                        <div className="text-gray-500">
-                          <div className="text-4xl mb-2">📊</div>
-                          <p className="font-medium">No processing data found</p>
-                          <p className="text-sm">Resources haven't logged any processing allocations for this period</p>
-                        </div>
-                      </td>
+                      <th colSpan={2} className="border-b border-slate-200"></th>
+                      {allTypes.map((t, i) => (
+                        <th key={t} colSpan={3} className={`py-1.5 px-1 text-center text-[10px] font-bold uppercase ${getColumnColor(i).header} border-l border-b`}>{t}</th>
+                      ))}
+                      <th colSpan={2} className="py-1.5 px-2 text-center text-[10px] font-bold uppercase bg-green-100 border-l border-b">Totals</th>
                     </tr>
+                    <tr>
+                      <th className="py-2 px-2 text-left font-semibold w-8 border-b">Sr</th>
+                      <th onClick={() => handleSort('location')} className="py-2 px-2 text-left font-semibold min-w-[140px] cursor-pointer hover:bg-slate-200 border-b">Location <SortIcon col="location" /></th>
+                      {allTypes.map((t, i) => (
+                        <React.Fragment key={t}>
+                          <th className={`py-2 px-1 text-right font-semibold w-10 border-l border-b ${getColumnColor(i).bg}`}>Cs</th>
+                          <th className={`py-2 px-1 text-right font-semibold w-10 border-b ${getColumnColor(i).bg}`}>Rt</th>
+                          <th className={`py-2 px-1 text-right font-semibold w-14 border-b ${getColumnColor(i).bg}`}>Tot</th>
+                        </React.Fragment>
+                      ))}
+                      <th className="py-2 px-2 text-right font-semibold w-14 border-l border-b bg-green-50">Bill</th>
+                      <th className="py-2 px-2 text-right font-semibold w-12 border-b bg-yellow-50">Tot</th>
+                    </tr>
+                  </>
+                ) : (
+                  <tr>
+                    <th className="py-2 px-2 text-left font-semibold w-8 border-b">Sr</th>
+                    <th onClick={() => handleSort('location')} className="py-2 px-2 text-left font-semibold min-w-[140px] cursor-pointer hover:bg-slate-200 border-b">Location <SortIcon col="location" /></th>
+                    {loggingTypes.map((t, i) => (
+                      <th key={t} className={`py-2 px-2 text-right font-semibold w-14 border-b ${getColumnColor(i).header}`}>{t}</th>
+                    ))}
+                    <th className="py-2 px-2 text-right font-semibold w-12 border-b">Rate</th>
+                    <th className="py-2 px-2 text-right font-semibold w-14 border-b bg-blue-50">Total</th>
+                    <th className="py-2 px-2 text-right font-semibold w-16 border-b bg-green-50">Billing</th>
+                  </tr>
+                )}
+              </thead>
+              <tbody>
+                {isLoading ? (
+                  <tr><td colSpan={20} className="py-8 text-center text-gray-500">Loading...</td></tr>
+                ) : activeView === 'processing' ? (
+                  sortedProcessing.length === 0 ? (
+                    <tr><td colSpan={20} className="py-8 text-center text-gray-500">No data</td></tr>
                   ) : (
                     <>
-                      {sortedProcessingData.map((row, idx) => (
-                        <tr key={`${row.location}-${idx}`} className="hover:bg-gray-50 transition-colors">
-                          <td className="py-3 px-3 text-sm text-gray-600">{idx + 1}</td>
-                          <td className="py-3 px-3 text-sm font-medium text-gray-900">{row.location}</td>
-                          <td className="py-3 px-3 text-sm text-right bg-teal-50/30 font-medium">{formatNumber(row.nrsNoRecords)}</td>
-                          <td className="py-3 px-3 text-sm text-right bg-teal-50/30 text-gray-500">$2.25</td>
-                          <td className="py-3 px-3 text-sm text-right bg-teal-50/30 text-teal-700 font-semibold">{formatCurrency(row.nrsNoTotal || 0)}</td>
-                          <td className="py-3 px-3 text-sm text-right bg-blue-50/30 font-medium">{formatNumber(row.manual)}</td>
-                          <td className="py-3 px-3 text-sm text-right bg-blue-50/30 text-gray-500">$3.00</td>
-                          <td className="py-3 px-3 text-sm text-right bg-blue-50/30 text-blue-700 font-semibold">{formatCurrency(row.manualTotal || 0)}</td>
-                          <td className="py-3 px-3 text-sm text-right bg-green-50/30 font-bold text-green-700">{formatCurrency(row.totalBilling || 0)}</td>
-                          <td className="py-3 px-3 text-sm text-right bg-yellow-50/30 font-bold text-gray-900">{formatNumber(row.grandTotal)}</td>
+                      {sortedProcessing.map((r, idx) => (
+                        <tr key={idx} className="border-b border-slate-100 hover:bg-slate-50">
+                          <td className="py-1.5 px-2 text-slate-500">{idx + 1}</td>
+                          <td className="py-1.5 px-2 font-medium text-slate-800 truncate max-w-[160px]" title={r.location}>{r.location}</td>
+                          {allTypes.map((t, i) => {
+                            const d = r.byType[t];
+                            const c = getColumnColor(i);
+                            const has = d?.cases > 0;
+                            return (
+                              <React.Fragment key={t}>
+                                <td className={`py-1.5 px-1 text-right border-l ${has ? `${c.bg} font-medium` : 'text-slate-300'}`}>{d?.cases || 0}</td>
+                                <td className={`py-1.5 px-1 text-right ${has ? c.bg : ''} text-slate-500`}>{d?.rate > 0 ? `$${d.rate.toFixed(2)}` : '-'}</td>
+                                <td className={`py-1.5 px-1 text-right ${has ? `${c.bg} ${c.text} font-medium` : 'text-slate-300'}`}>{has ? `$${d.total.toFixed(0)}` : '$0'}</td>
+                              </React.Fragment>
+                            );
+                          })}
+                          <td className="py-1.5 px-2 text-right font-semibold text-green-700 border-l bg-green-50/50">{formatCurrency(r.totalBilling)}</td>
+                          <td className="py-1.5 px-2 text-right font-bold text-slate-800 bg-yellow-50/50">{r.totalCases}</td>
                         </tr>
                       ))}
                       {processingTotals && (
-                        <tr className="bg-gray-100 font-bold border-t-2 border-gray-300">
-                          <td className="py-4 px-3"></td>
-                          <td className="py-4 px-3 text-sm text-gray-900 uppercase">Grand Total</td>
-                          <td className="py-4 px-3 text-sm text-right bg-teal-100">{formatNumber(processingTotals.nrsNoRecords)}</td>
-                          <td className="py-4 px-3 text-sm text-right bg-teal-100"></td>
-                          <td className="py-4 px-3 text-sm text-right bg-teal-100 text-teal-800">{formatCurrency(processingTotals.nrsNoTotal || 0)}</td>
-                          <td className="py-4 px-3 text-sm text-right bg-blue-100">{formatNumber(processingTotals.manual)}</td>
-                          <td className="py-4 px-3 text-sm text-right bg-blue-100"></td>
-                          <td className="py-4 px-3 text-sm text-right bg-blue-100 text-blue-800">{formatCurrency(processingTotals.manualTotal || 0)}</td>
-                          <td className="py-4 px-3 text-sm text-right bg-green-100 text-green-800">{formatCurrency(processingTotals.totalBilling || 0)}</td>
-                          <td className="py-4 px-3 text-sm text-right bg-yellow-100 text-gray-900">{formatNumber(processingTotals.grandTotal)}</td>
+                        <tr className="bg-slate-800 text-white font-semibold sticky bottom-0">
+                          <td className="py-2 px-2"></td>
+                          <td className="py-2 px-2">Total</td>
+                          {allTypes.map(t => (
+                            <React.Fragment key={t}>
+                              <td className="py-2 px-1 text-right border-l border-slate-600">{processingTotals.byType[t]?.cases || 0}</td>
+                              <td className="py-2 px-1"></td>
+                              <td className="py-2 px-1 text-right">${(processingTotals.byType[t]?.total || 0).toFixed(0)}</td>
+                            </React.Fragment>
+                          ))}
+                          <td className="py-2 px-2 text-right border-l border-slate-600 bg-green-600">{formatCurrency(processingTotals.totalBilling)}</td>
+                          <td className="py-2 px-2 text-right bg-yellow-600">{processingTotals.grandTotal}</td>
                         </tr>
                       )}
                     </>
-                  )}
-                </tbody>
-              </table>
+                  )
+                ) : (
+                  sortedLogging.length === 0 ? (
+                    <tr><td colSpan={20} className="py-8 text-center text-gray-500">No data</td></tr>
+                  ) : (
+                    <>
+                      {sortedLogging.map((r, idx) => (
+                        <tr key={idx} className="border-b border-slate-100 hover:bg-slate-50">
+                          <td className="py-1.5 px-2 text-slate-500">{idx + 1}</td>
+                          <td className="py-1.5 px-2 font-medium text-slate-800 truncate max-w-[160px]" title={r.location}>{r.location}</td>
+                          {loggingTypes.map((t, i) => {
+                            const d = r.byType[t];
+                            const c = getColumnColor(i);
+                            const has = d?.cases > 0;
+                            return <td key={t} className={`py-1.5 px-2 text-right ${has ? `${c.bg} ${c.text} font-medium` : 'text-slate-300'}`}>{d?.cases || 0}</td>;
+                          })}
+                          <td className="py-1.5 px-2 text-right text-slate-600">${(r.flatrate || 1.08).toFixed(2)}</td>
+                          <td className="py-1.5 px-2 text-right font-medium text-blue-700 bg-blue-50/50">{r.totalCases}</td>
+                          <td className="py-1.5 px-2 text-right font-bold text-green-700 bg-green-50/50">{formatCurrency(r.totalBilling)}</td>
+                        </tr>
+                      ))}
+                      {loggingTotals && (
+                        <tr className="bg-slate-800 text-white font-semibold sticky bottom-0">
+                          <td className="py-2 px-2"></td>
+                          <td className="py-2 px-2">Total</td>
+                          {loggingTypes.map(t => <td key={t} className="py-2 px-2 text-right">{loggingTotals.byType[t]?.cases || 0}</td>)}
+                          <td className="py-2 px-2"></td>
+                          <td className="py-2 px-2 text-right bg-blue-600">{loggingTotals.totalCases}</td>
+                          <td className="py-2 px-2 text-right bg-green-600">{formatCurrency(loggingTotals.totalBilling)}</td>
+                        </tr>
+                      )}
+                    </>
+                  )
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Detailed Entries */}
+        <div className="bg-white rounded-lg shadow-sm overflow-hidden">
+          <div className="px-3 py-2 border-b bg-gray-50 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <button onClick={() => setShowDetailed(!showDetailed)} className="text-gray-500 hover:text-gray-700">{showDetailed ? '▼' : '▶'}</button>
+              <span className="text-xs font-semibold text-gray-700">📋 Detailed Entries • {formatNumber(detailedTotal)} records</span>
             </div>
+            <input type="text" placeholder="Search..." value={detailedSearch} onChange={(e) => setDetailedSearch(e.target.value)}
+              className="px-2 py-1 text-xs border rounded w-36" />
           </div>
 
-          {/* Processing Summary Cards */}
-          {processingTotals && (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-              <div className="bg-white rounded-xl shadow-md p-4 border-l-4 border-teal-500">
-                <div className="text-sm text-gray-500 uppercase tracking-wider">NRS-NO Records</div>
-                <div className="text-sm font-bold text-gray-900 mt-1">{formatNumber(processingTotals.nrsNoRecords)} cases</div>
-                <div className="text-sm font-semibold text-teal-600">{formatCurrency(processingTotals.nrsNoTotal)}</div>
-                <div className="text-xs text-gray-400 mt-1">@ $2.25/case</div>
-              </div>
-              <div className="bg-white rounded-xl shadow-md p-4 border-l-4 border-blue-500">
-                <div className="text-sm text-gray-500 uppercase tracking-wider">Manual</div>
-                <div className="text-sm font-bold text-gray-900 mt-1">{formatNumber(processingTotals.manual)} cases</div>
-                <div className="text-sm font-semibold text-blue-600">{formatCurrency(processingTotals.manualTotal)}</div>
-                <div className="text-xs text-gray-400 mt-1">@ $3.00/case</div>
-              </div>
-              <div className="bg-white rounded-xl shadow-md p-4 border-l-4 border-green-500">
-                <div className="text-sm text-gray-500 uppercase tracking-wider">Total Billing</div>
-                <div className="text-sm font-bold text-green-700 mt-1">{formatCurrency(processingTotals.totalBilling)}</div>
-                <div className="text-sm text-gray-500">Processing Revenue</div>
-              </div>
-              <div className="bg-white rounded-xl shadow-md p-4 border-l-4 border-yellow-500">
-                <div className="text-sm text-gray-500 uppercase tracking-wider">Grand Total Cases</div>
-                <div className="text-sm font-bold text-gray-900 mt-1">{formatNumber(processingTotals.grandTotal)}</div>
-                <div className="text-sm text-gray-500">NRS-NO + Manual</div>
-              </div>
-            </div>
-          )}
-        </>
-      )}
-
-      {/* LOGGING VIEW */}
-      {activeView === 'logging' && (
-        <div className="bg-white rounded-xl shadow-md overflow-hidden">
-          <div className="p-6 bg-gradient-to-r from-emerald-50 to-green-50 border-b">
-            <h3 className="text-xl font-bold text-emerald-800">MRO Logging Summary</h3>
-            {/* <p className="text-sm text-emerald-600 mt-1">All logging entries at flat rate of $1.08 per case</p> */}
-          </div>
-          
-          {isLoading ? (
-            <Loader message="Loading logging data..." />
-          ) : loggingTotals ? (
-            <div className="p-6">
-              <div className="overflow-x-auto">
-                <table className="w-full max-w-2xl">
-                  <thead>
-                    <tr className="bg-emerald-50">
-                      <th className="py-3 px-4 text-left text-sm font-semibold text-emerald-800">Details</th>
-                      <th className="py-3 px-4 text-right text-sm font-semibold text-blue-800 bg-blue-50">Cases</th>
-                      <th className="py-3 px-4 text-right text-sm font-semibold text-purple-800 bg-purple-50">Pricing</th>
-                      <th className="py-3 px-4 text-right text-sm font-semibold text-green-800 bg-green-50">Grand Total</th>
+          {showDetailed && (
+            <>
+              <div className="overflow-auto" style={{ maxHeight: '32vh' }}>
+                <table className="w-full text-xs">
+                  <thead className="sticky top-0 z-10 bg-slate-50">
+                    <tr>
+                      <th className="py-2 px-2 text-left font-semibold border-b">Date</th>
+                      <th className="py-2 px-2 text-left font-semibold border-b">Resource</th>
+                      <th className="py-2 px-2 text-left font-semibold border-b">Location</th>
+                      <th className="py-2 px-2 text-left font-semibold border-b">Req ID</th>
+                      <th className="py-2 px-2 text-left font-semibold border-b">Type</th>
+                      <th className="py-2 px-2 text-left font-semibold border-b">Requestor</th>
+                      <th className="py-2 px-2 text-right font-semibold border-b">Rate</th>
+                      <th className="py-2 px-2 text-right font-semibold border-b bg-green-50">Amount</th>
+                      <th className="py-2 px-2 text-left font-semibold border-b">Remark</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr className="border-b">
-                      <td className="py-4 px-4 text-sm font-medium text-gray-900 bg-emerald-50/50">MRO Logging</td>
-                      <td className="py-4 px-4 text-right text-lg font-bold text-blue-700 bg-blue-50/50">{formatNumber(loggingTotals.totalCases)}</td>
-                      <td className="py-4 px-4 text-right text-lg font-bold text-purple-700 bg-purple-50/50">$1.08</td>
-                      <td className="py-4 px-4 text-right text-lg font-bold text-green-700 bg-green-50/50">{formatCurrency(loggingTotals.totalBilling)}</td>
-                    </tr>
+                    {detailedLoading ? (
+                      <tr><td colSpan={9} className="py-6 text-center text-gray-500">Loading...</td></tr>
+                    ) : detailedData.length === 0 ? (
+                      <tr><td colSpan={9} className="py-6 text-center text-gray-500">No entries</td></tr>
+                    ) : (
+                      detailedData.map((a, i) => (
+                        <tr key={a._id || i} className="border-b border-slate-100 hover:bg-slate-50">
+                          <td className="py-1.5 px-2 text-slate-600">{formatDate(a.allocation_date)}</td>
+                          <td className="py-1.5 px-2 font-medium text-slate-800">{a.resource_name}</td>
+                          <td className="py-1.5 px-2 text-slate-700 max-w-[100px] truncate" title={a.subproject_name}>{a.subproject_name}</td>
+                          <td className="py-1.5 px-2 text-slate-600 font-mono text-[10px]">{a.request_id || '—'}</td>
+                          <td className="py-1.5 px-2"><RequestTypeBadge type={a.request_type} /></td>
+                          <td className="py-1.5 px-2"><RequestTypeBadge type={a.requestor_type} /></td>
+                          <td className="py-1.5 px-2 text-right text-slate-600">{formatCurrency(a.billing_rate)}</td>
+                          <td className="py-1.5 px-2 text-right font-semibold text-green-700 bg-green-50/50">{formatCurrency(a.billing_amount)}</td>
+                          <td className="py-1.5 px-2 text-slate-500 max-w-[80px] truncate" title={a.remark}>{a.remark || '—'}</td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
 
-              {/* Logging Summary Cards */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
-                <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-6 border border-blue-200">
-                  <div className="text-sm text-blue-600 uppercase tracking-wider font-medium">Total Cases</div>
-                  <div className="text-md font-bold text-blue-800 mt-2">{formatNumber(loggingTotals.totalCases)}</div>
-                  <div className="text-blue-600 text-sm mt-1">logging entries</div>
-                </div>
-                <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-xl p-6 border border-purple-200">
-                  <div className="text-sm text-purple-600 uppercase tracking-wider font-medium">Rate per Case</div>
-                  <div className="text-md font-bold text-purple-800 mt-2">$1.08</div>
-                  <div className="text-purple-600 text-sm mt-1">flat rate</div>
-                </div>
-                <div className="bg-gradient-to-br  from-green-50 to-green-100 rounded-xl flex flex-col justify-center pl-6  border border-green-200">
-                  <div className="text-sm text-green-600 uppercase tracking-wider font-medium">Total Billing</div>
-                  <div className="text-md font-bold text-green-800 mt-2">{formatCurrency(loggingTotals.totalBilling)}</div>
-                  <div className="text-green-600 text-sm mt-1">logging revenue</div>
-                </div>
-              </div>
-
-              {/* Detailed Logging Table */}
-              {loggingSummary.length > 0 && (
-                <div className="mt-6">
-                  <h4 className="text-lg font-semibold text-gray-800 mb-3">Detailed Logging Entries</h4>
-                  <div className="overflow-x-auto max-h-96">
-                    <table className="w-full text-sm">
-                      <thead className="sticky top-0 bg-gray-100">
-                        <tr>
-                          <th className="py-2 px-3 text-left">Date</th>
-                          <th className="py-2 px-3 text-left">Resource</th>
-                          <th className="py-2 px-3 text-left">Location</th>
-                          <th className="py-2 px-3 text-left">Request ID</th>
-                          <th className="py-2 px-3 text-left">Request Type</th>
-                          <th className="py-2 px-3 text-right">Amount</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y">
-                        {loggingSummary.slice(0, 50).map((entry, idx) => (
-                          <tr key={entry._id || idx} className="hover:bg-gray-50">
-                            <td className="py-2 px-3">{formatDate(entry.allocation_date)}</td>
-                            <td className="py-2 px-3">{entry.resource_name}</td>
-                            <td className="py-2 px-3">{entry.subproject_name}</td>
-                            <td className="py-2 px-3">{entry.request_id || '-'}</td>
-                            <td className="py-2 px-3">{entry.request_type}</td>
-                            <td className="py-2 px-3 text-right text-green-600 font-medium">{formatCurrency(entry.billing_amount || MRO_PRICING.LOGGING)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    {loggingSummary.length > 50 && (
-                      <div className="text-center py-3 text-gray-500 text-sm">
-                        Showing 50 of {loggingSummary.length} entries
-                      </div>
-                    )}
+              {detailedPages > 1 && (
+                <div className="px-3 py-2 border-t bg-gray-50 flex items-center justify-between text-xs">
+                  <span className="text-gray-500">Page {detailedPage} of {detailedPages}</span>
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => fetchDetailed(1)} disabled={detailedPage <= 1} className="px-2 py-1 border rounded hover:bg-gray-100 disabled:opacity-50">««</button>
+                    <button onClick={() => fetchDetailed(detailedPage - 1)} disabled={detailedPage <= 1} className="px-2 py-1 border rounded hover:bg-gray-100 disabled:opacity-50">‹</button>
+                    <span className="px-2">{detailedPage}</span>
+                    <button onClick={() => fetchDetailed(detailedPage + 1)} disabled={detailedPage >= detailedPages} className="px-2 py-1 border rounded hover:bg-gray-100 disabled:opacity-50">›</button>
+                    <button onClick={() => fetchDetailed(detailedPages)} disabled={detailedPage >= detailedPages} className="px-2 py-1 border rounded hover:bg-gray-100 disabled:opacity-50">»»</button>
                   </div>
                 </div>
               )}
-            </div>
-          ) : (
-            <div className="py-16 text-center">
-              <div className="text-gray-400">
-                <div className="text-6xl mb-4">📝</div>
-                <p className="text-lg font-medium">No logging data found</p>
-                <p className="text-sm mt-2">Resources haven't logged any entries for this period</p>
-              </div>
-            </div>
+            </>
           )}
         </div>
-      )}
+      </div>
     </div>
   );
 };

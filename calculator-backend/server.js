@@ -19,13 +19,7 @@ mongoose.set('strictQuery', false);   // or true, both silence the warning
 // const uri = "mongodb+srv://brain:Xeno%402025@myapp.global.mongocluster.cosmos.azure.com/?tls=true&authMechanism=SCRAM-SHA-256&retrywrites=false&maxIdleTimeMS=120000";
 
  async function connectDB() {
-    try {
-        await mongoose.connect(process.env.MONGODB_URI, {
-            // These options ensure stability with Cosmos DB
-            useNewUrlParser: true,
-            useUnifiedTopology: true,
-            retryWrites: false, 
-        });
+    try { mongoose.connect(process.env.MONGODB_URI);
         console.log("Successfully connected to MongoDB");
     } catch (error) {
         console.error("Connection error:", error);
@@ -58,6 +52,18 @@ app.use('/api/admin', require('./routes/adminroutes/admin-resource-cases.routes'
 const mroAllocRoutes = require('./routes/allocation routes/mro-daily-allocations.routes');
 const verismaAllocRoutes = require('./routes/allocation routes/verisma-daily-allocations.routes');
 const datavantAllocRoutes = require('./routes/allocation routes/datavant-daily-allocations.routes');
+
+// payout
+const payoutRoutes = require('./routes/payout');
+const payoutExportRoutes = require('./routes/payoutexport');
+
+const processingPayoutRoutes = require('./routes/processingPayout/processingPayout.routes');
+app.use('/api/processing-payout', processingPayoutRoutes);
+// server.js
+const payrollRoutes = require('./routes/payroll.route');
+app.use('/api/payroll', payrollRoutes);
+app.use('/api/payout', payoutRoutes);
+app.use('/api/payout/export', payoutExportRoutes);
 
 app.use('/api/mro-daily-allocations', mroAllocRoutes);
 app.use('/api/verisma-daily-allocations', verismaAllocRoutes);
