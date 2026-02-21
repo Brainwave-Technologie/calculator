@@ -80,16 +80,25 @@ const AdminResourceCases = () => {
 
   const fetchGeographies = async () => {
     try {
-      const response = await axios.get(`${API_URL}/geographies`, getAuthHeaders());
+      const response = await axios.get(`${API_URL}/geography`, {
+        ...getAuthHeaders(),
+        params: { limit: 100 }
+      });
       setGeographies(response.data.geographies || response.data || []);
     } catch (error) {
       console.error('Error fetching geographies:', error);
     }
   };
 
-  const fetchClients = async () => {
+  const fetchClients = async (geographyId = '') => {
     try {
-      const response = await axios.get(`${API_URL}/clients`, getAuthHeaders());
+      const url = geographyId
+        ? `${API_URL}/client/geography/${geographyId}`
+        : `${API_URL}/client`;
+      const response = await axios.get(url, {
+        ...getAuthHeaders(),
+        params: { limit: 100 }
+      });
       setClients(response.data.clients || response.data || []);
     } catch (error) {
       console.error('Error fetching clients:', error);
@@ -451,7 +460,11 @@ const AdminResourceCases = () => {
                   <label className="block text-xs font-medium text-gray-600 mb-1">Geography</label>
                   <select
                     value={listFilters.geography_id}
-                    onChange={(e) => setListFilters(prev => ({ ...prev, geography_id: e.target.value }))}
+                    onChange={(e) => {
+                      const geoId = e.target.value;
+                      setListFilters(prev => ({ ...prev, geography_id: geoId, client_id: '' }));
+                      fetchClients(geoId);
+                    }}
                     className="w-full px-3 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
                   >
                     <option value="">All Geographies</option>
@@ -819,7 +832,7 @@ const AdminResourceCases = () => {
                         <th className="px-2 py-2 text-left font-semibold border-r">SR#</th>
                         <th className="px-2 py-2 text-left font-semibold border-r">Client</th>
                         <th className="px-2 py-2 text-left font-semibold border-r">Alloc Date</th>
-                        <th className="px-2 py-2 text-left font-semibold border-r">Log Date</th>
+                        <th className="px-2 py-2 text-left font-semibold border-r">System Captured Date</th>
                         <th className="px-2 py-2 text-left font-semibold border-r">Process</th>
                         <th className="px-2 py-2 text-left font-semibold border-r">Location</th>
                         <th className="px-2 py-2 text-left font-semibold border-r">Request ID</th>
@@ -848,7 +861,7 @@ const AdminResourceCases = () => {
                               }`}>{caseItem.client_name}</span>
                             </td>
                             <td className="px-2 py-1.5 border-r">{formatDate(caseItem.allocation_date)}</td>
-                            <td className="px-2 py-1.5 border-r">{formatDate(caseItem.logged_date)}</td>
+                            <td className="px-2 py-1.5 border-r">{formatDate(caseItem.system_captured_date || caseItem.logged_date)}</td>
                             <td className="px-2 py-1.5 border-r">{caseItem.process_type || caseItem.project_name}</td>
                             <td className="px-2 py-1.5 border-r font-medium">{caseItem.subproject_name}</td>
                             <td className="px-2 py-1.5 border-r">{caseItem.request_id || '-'}</td>

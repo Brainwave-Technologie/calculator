@@ -123,7 +123,8 @@ router.post('/', authenticateResource, async (req, res) => {
     const allocation = new DatavantDailyAllocation({
       sr_no: srNo,
       allocation_date: new Date(allocation_date),
-      logged_date: new Date(),
+      logged_date: new Date(allocation_date),       // same as allocation_date (the work date resource selected)
+      system_captured_date: new Date(),             // actual server time when resource hit submit
       resource_id: resource._id,
       resource_name: resource.name,
       resource_email: resource.email,

@@ -17,15 +17,16 @@ const VERISMA_REQUESTOR_TYPES = [
   'Provider', 'Service'
 ];
 
-const VerismaAllocationPanel = ({ 
+const VerismaAllocationPanel = ({
   locations = [],  // DATE-FILTERED locations from parent
-  selectedDate, 
-  resourceInfo, 
+  selectedDate,
+  resourceInfo,
   geographyId,
   geographyName,
   allocations = [],  // Allocations for selectedDate
   onRefresh,
-  loading 
+  onDateChange,
+  loading
 }) => {
   // Form state - UPDATED: Added selectedProcess
   const [formData, setFormData] = useState({
@@ -39,7 +40,26 @@ const VerismaAllocationPanel = ({
     count: 1,
     remark: ''
   });
-  
+
+  // Local allocation date for the form
+  const [formDate, setFormDate] = useState(selectedDate || '');
+
+  // Sync formDate when parent selectedDate changes
+  useEffect(() => {
+    if (selectedDate) setFormDate(selectedDate);
+  }, [selectedDate]);
+
+  // Min = first day of current month, Max = today
+  const { minDate, maxDate } = useMemo(() => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    return {
+      minDate: `${year}-${month}-01`,
+      maxDate: now.toLocaleDateString('en-CA')
+    };
+  }, []);
+
   // UI state
   const [submitting, setSubmitting] = useState(false);
   const [requestIdWarning, setRequestIdWarning] = useState(null);
@@ -141,34 +161,27 @@ const VerismaAllocationPanel = ({
   }, [allocations]);
 
   // ═══════════════════════════════════════════════════════════════
-  // FIXED DATE VALIDATION - Using local date string comparison
+  // DATE VALIDATION - Using formDate (local form date picker)
   // ═══════════════════════════════════════════════════════════════
   const dateValidation = useMemo(() => {
-    if (!selectedDate) return { valid: false, message: 'No date selected' };
-    
-    // Get today's date in YYYY-MM-DD format (local time)
-    const today = new Date();
-    const todayStr = today.toLocaleDateString('en-CA'); // Returns YYYY-MM-DD format
-    
-    // selectedDate is already in YYYY-MM-DD format
-    const selectedStr = selectedDate;
-    
-    // String comparison works for YYYY-MM-DD format
-    if (selectedStr > todayStr) {
+    if (!formDate) return { valid: false, message: 'No date selected' };
+
+    const todayStr = new Date().toLocaleDateString('en-CA');
+
+    if (formDate > todayStr) {
       return { valid: false, message: 'Cannot log entries for future dates' };
     }
-    
-    // Check if month is locked (past month-end)
-    const selected = new Date(selectedDate + 'T00:00:00');
+
+    const selected = new Date(formDate + 'T00:00:00');
     const lastDayOfMonth = new Date(selected.getFullYear(), selected.getMonth() + 1, 0);
     const lastDayStr = lastDayOfMonth.toLocaleDateString('en-CA');
-    
+
     if (todayStr > lastDayStr) {
       return { valid: false, message: 'This month is locked. Cannot add new entries.' };
     }
-    
+
     return { valid: true, message: null };
-  }, [selectedDate]);
+  }, [formDate]);
 
   // ═══════════════════════════════════════════════════════════════
   // HANDLE PROCESS CHANGE - Reset location when process changes
@@ -279,7 +292,7 @@ const VerismaAllocationPanel = ({
     try {
       await axios.post(`${API_URL}/verisma-daily-allocations`, {
         subproject_id: formData.subproject_id,
-        allocation_date: selectedDate,
+        allocation_date: formDate,
         facility: formData.facility,
         request_id: formData.request_id.trim(),
         request_type: formData.request_type,
@@ -441,9 +454,9 @@ const VerismaAllocationPanel = ({
       {/* No Locations Warning */}
       {allAssignedLocations.length === 0 && (
         <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-yellow-800">
-          <p className="text-sm font-medium">⚠️ No locations available for this date</p>
+          <p className="text-sm font-medium">⚠️ No Verisma locations assigned to you</p>
           <p className="text-xs mt-1">
-            You may not have any locations assigned that are effective on or before {selectedDate}.
+            Contact your admin to get locations assigned.
           </p>
         </div>
       )}
@@ -464,8 +477,8 @@ const VerismaAllocationPanel = ({
         <div className="p-4">
           {allAssignedLocations.length === 0 ? (
             <div className="text-center py-4 text-yellow-600">
-              <p className="text-sm">⚠️ No locations are assigned to you for this date.</p>
-              <p className="text-xs mt-1">Try selecting a more recent date.</p>
+              <p className="text-sm">⚠️ No Verisma locations assigned to you.</p>
+              <p className="text-xs mt-1">Contact your admin to get locations assigned.</p>
             </div>
           ) : !dateValidation.valid ? (
             <div className="text-center py-4 text-red-500">
@@ -477,12 +490,17 @@ const VerismaAllocationPanel = ({
               {/* Form Row 1 - REORDERED: Process before Location */}
               <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 mb-3">
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Allocation Date</label>
-                  <input 
-                    type="text" 
-                    value={selectedDate} 
-                    readOnly 
-                    className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded bg-gray-50" 
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Allocation Date <span className="text-red-500">*</span></label>
+                  <input
+                    type="date"
+                    value={formDate}
+                    min={minDate}
+                    max={maxDate}
+                    onChange={(e) => {
+                      setFormDate(e.target.value);
+                      if (onDateChange) onDateChange(e.target.value);
+                    }}
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500"
                   />
                 </div>
                 

@@ -197,15 +197,6 @@ router.post('/', authenticateResource, async (req, res) => {
       
       for (const sp of assignment.subprojects || []) {
         if (sp.subproject_id?.toString() === subproject_id.toString()) {
-          // Check assigned_date
-          if (sp.assigned_date) {
-            const assignedDateStr = normalizeDateString(sp.assigned_date);
-            if (assignedDateStr > targetDateStr) {
-              return res.status(403).json({ 
-                message: `This location was assigned on ${assignedDateStr}. Cannot log for dates before assignment.` 
-              });
-            }
-          }
           hasAccess = true;
           assignmentInfo = {
             geography_id: assignment.geography_id,
@@ -247,16 +238,17 @@ router.post('/', authenticateResource, async (req, res) => {
     const entryCount = parseInt(count) || 1;
     const srNo = await getNextSrNo(resource.email, targetDate);
     
-    // Calculate late log
+    // Calculate late log: did resource submit to system after the allocation_date?
     const todayStr = getPSTDateString();
-    const isLateLog = targetDateStr < todayStr;
+    const isLateLog = targetDateStr < todayStr;  // system_captured_date (today) is after allocation_date
     const daysLate = isLateLog ? Math.floor((new Date(todayStr) - new Date(targetDateStr)) / (1000 * 60 * 60 * 24)) : 0;
     
     // Create allocation
     const allocation = new VerismaDailyAllocation({
       sr_no: srNo,
       allocation_date: targetDate,
-      logged_date: new Date(),
+      logged_date: targetDate,                      // same as allocation_date (the work date resource selected)
+      system_captured_date: new Date(),             // actual server time when resource hit submit
       resource_id: resource._id,
       resource_name: resource.name,
       resource_email: resource.email.toLowerCase(),

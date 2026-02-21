@@ -472,7 +472,7 @@ const AdminPreviousCases = () => {
                     <th className="px-2 py-2 text-left font-semibold border-r">SR#</th>
                     <th className="px-2 py-2 text-left font-semibold border-r">Resource</th>
                     <th className="px-2 py-2 text-left font-semibold border-r">Alloc Date</th>
-                    <th className="px-2 py-2 text-left font-semibold border-r">Log Date</th>
+                    <th className="px-2 py-2 text-left font-semibold border-r">System Captured Date</th>
                     <th className="px-2 py-2 text-left font-semibold border-r">Process</th>
                     <th className="px-2 py-2 text-left font-semibold border-r">Location</th>
                     {filters.client === 'MRO' && <th className="px-2 py-2 text-left font-semibold border-r">Facility</th>}
@@ -499,7 +499,7 @@ const AdminPreviousCases = () => {
                           <div className="text-[10px] text-gray-500">{caseItem.resource_email}</div>
                         </td>
                         <td className="px-2 py-1.5 border-r">{formatDate(caseItem.allocation_date)}</td>
-                        <td className="px-2 py-1.5 border-r">{formatDate(caseItem.logged_date)}</td>
+                        <td className="px-2 py-1.5 border-r">{formatDate(caseItem.system_captured_date || caseItem.logged_date)}</td>
                         <td className="px-2 py-1.5 border-r">
                           <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
                             caseItem.process_type === 'Processing' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'

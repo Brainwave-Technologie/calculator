@@ -13,6 +13,7 @@ const DatavantAllocationPanel = ({
   geographyName,
   allocations = [],
   onRefresh,
+  onDateChange,
   loading
 }) => {
   const [formData, setFormData] = useState({
@@ -20,6 +21,25 @@ const DatavantAllocationPanel = ({
     count: 1,
     remark: ''
   });
+
+  // Local allocation date for the form
+  const [formDate, setFormDate] = useState(selectedDate || '');
+
+  // Sync formDate when parent selectedDate changes
+  React.useEffect(() => {
+    if (selectedDate) setFormDate(selectedDate);
+  }, [selectedDate]);
+
+  // Min = first day of current month, Max = today
+  const { minDate, maxDate } = React.useMemo(() => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    return {
+      minDate: `${year}-${month}-01`,
+      maxDate: now.toLocaleDateString('en-CA')
+    };
+  }, []);
 
   const [submitting, setSubmitting] = useState(false);
   const [selectedLocationInfo, setSelectedLocationInfo] = useState(null);
@@ -62,20 +82,20 @@ const DatavantAllocationPanel = ({
 
   // Date validation
   const dateValidation = useMemo(() => {
-    if (!selectedDate) return { valid: false, message: 'No date selected' };
-    const selected = new Date(selectedDate);
-    const today = new Date();
-    selected.setHours(0, 0, 0, 0);
-    today.setHours(0, 0, 0, 0);
-    
-    if (selected > today) return { valid: false, message: 'Cannot log entries for future dates' };
-    
+    if (!formDate) return { valid: false, message: 'No date selected' };
+
+    const todayStr = new Date().toLocaleDateString('en-CA');
+
+    if (formDate > todayStr) return { valid: false, message: 'Cannot log entries for future dates' };
+
+    const selected = new Date(formDate + 'T00:00:00');
     const lastDayOfMonth = new Date(selected.getFullYear(), selected.getMonth() + 1, 0);
-    lastDayOfMonth.setHours(23, 59, 59, 999);
-    if (new Date() > lastDayOfMonth) return { valid: false, message: 'This month is locked' };
-    
+    const lastDayStr = lastDayOfMonth.toLocaleDateString('en-CA');
+
+    if (todayStr > lastDayStr) return { valid: false, message: 'This month is locked' };
+
     return { valid: true };
-  }, [selectedDate]);
+  }, [formDate]);
 
   const handleLocationChange = (subprojectId) => {
     const location = allAssignedLocations.find(l => l.subproject_id === subprojectId);
@@ -97,7 +117,7 @@ const DatavantAllocationPanel = ({
     try {
       await axios.post(`${API_URL}/datavant-daily-allocations`, {
         subproject_id: formData.subproject_id,
-        allocation_date: selectedDate,
+        allocation_date: formDate,
         count: formData.count || 1,
         remark: formData.remark || '',
         geography_id: selectedLocationInfo?.geography_id || geographyId,
@@ -182,8 +202,8 @@ const DatavantAllocationPanel = ({
 
       {allAssignedLocations.length === 0 && (
         <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-yellow-800">
-          <p className="text-sm font-medium">No process types assigned for this date</p>
-          <p className="text-xs mt-1">Process types are assigned from their assignment date onwards.</p>
+          <p className="text-sm font-medium">No Datavant process types assigned to you</p>
+          <p className="text-xs mt-1">Contact your admin to get process types assigned.</p>
         </div>
       )}
 
@@ -196,14 +216,24 @@ const DatavantAllocationPanel = ({
         <div className="px-4 py-2 bg-purple-600 text-white"><h3 className="text-sm font-semibold">Add New Entry</h3></div>
         <div className="p-4">
           {allAssignedLocations.length === 0 ? (
-            <div className="text-center py-4 text-yellow-600 text-sm">No process types assigned for this date</div>
+            <div className="text-center py-4 text-yellow-600 text-sm">No Datavant process types assigned. Contact admin.</div>
           ) : !dateValidation.valid ? (
             <div className="text-center py-4 text-red-500 text-sm">{dateValidation.message}</div>
           ) : (
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Date</label>
-                <input type="text" value={selectedDate} readOnly className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded bg-gray-50" />
+                <label className="block text-xs font-medium text-gray-600 mb-1">Allocation Date <span className="text-red-500">*</span></label>
+                <input
+                  type="date"
+                  value={formDate}
+                  min={minDate}
+                  max={maxDate}
+                  onChange={(e) => {
+                    setFormDate(e.target.value);
+                    if (onDateChange) onDateChange(e.target.value);
+                  }}
+                  className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-purple-500"
+                />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Process Type <span className="text-red-500">*</span></label>

@@ -43,8 +43,10 @@ const MRODailyAllocationSchema = new mongoose.Schema({
   // ============ DATE FIELDS ============
   // Allocation Date = Date when case was ASSIGNED to resource
   allocation_date: { type: Date, required: true, index: true },
-  // Logged Date = Date when resource actually LOGGED the case
+  // Logged Date = Date when resource actually LOGGED the case (kept for backward compat)
   logged_date: { type: Date, index: true },
+  // System Captured Date = exact timestamp when the system captured the entry (same as logged_date)
+  system_captured_date: { type: Date, index: true },
   day: { type: Number, min: 1, max: 31 },
   month: { type: Number, min: 1, max: 12, index: true },
   year: { type: Number, index: true },
@@ -168,21 +170,25 @@ MRODailyAllocationSchema.pre('save', function(next) {
     this.year = date.getFullYear();
   }
   
-  // Set logged_date if not set
+  // logged_date = same as allocation_date (the work date resource selected)
   if (!this.logged_date) {
-    this.logged_date = new Date();
+    this.logged_date = this.allocation_date || new Date();
   }
-  
-  // Check if late log
-  if (this.allocation_date && this.logged_date) {
+  // system_captured_date = actual server time when resource hit submit
+  if (!this.system_captured_date) {
+    this.system_captured_date = new Date();
+  }
+
+  // is_late_log: resource submitted to system (system_captured_date) after the allocation_date
+  if (this.allocation_date && this.system_captured_date) {
     const allocDate = new Date(this.allocation_date);
     allocDate.setHours(0, 0, 0, 0);
-    const logDate = new Date(this.logged_date);
-    logDate.setHours(0, 0, 0, 0);
-    
-    if (logDate > allocDate) {
+    const capturedDate = new Date(this.system_captured_date);
+    capturedDate.setHours(0, 0, 0, 0);
+
+    if (capturedDate > allocDate) {
       this.is_late_log = true;
-      this.days_late = Math.floor((logDate - allocDate) / (1000 * 60 * 60 * 24));
+      this.days_late = Math.floor((capturedDate - allocDate) / (1000 * 60 * 60 * 24));
     }
   }
   
@@ -205,7 +211,11 @@ MRODailyAllocationSchema.pre('save', function(next) {
     if (this.process_type === 'Processing') {
       if (this.requestor_type === 'NRS-NO Records') {
         this.billing_rate = 2.25;
-      } else if (this.requestor_type === 'Manual') {
+      } else if (
+        this.requestor_type === 'Manual' ||
+        this.requestor_type === 'Processed' ||
+        this.requestor_type === 'Processed through File Drop'
+      ) {
         this.billing_rate = 3.00;
       } else {
         this.billing_rate = 0;

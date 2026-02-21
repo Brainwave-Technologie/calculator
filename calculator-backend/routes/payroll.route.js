@@ -29,16 +29,15 @@ const getDatesInMonth = (month, year) => {
       dateStr: `${day}-${date.toLocaleString('en-US', { month: 'short' })}-${year.toString().slice(-2)}`,
       dayName: date.toLocaleString('en-US', { weekday: 'short' }),
       isWeekend: date.getDay() === 0 || date.getDay() === 6,
-      isoDate: date.toISOString().split('T')[0]
+      isoDate: `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
     });
   }
   return dates;
 };
 
-// Format date for display
+// Format date for display — always use UTC to match how allocation_date is stored in MongoDB
 const formatDateKey = (date) => {
-  const d = new Date(date);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return new Date(date).toISOString().split('T')[0];
 };
 
 // ================= VERISMA PAYROLL (DAY-WISE) =================

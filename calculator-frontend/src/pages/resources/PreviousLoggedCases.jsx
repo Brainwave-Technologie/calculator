@@ -18,7 +18,7 @@ const DATAVANT_TASK_TYPES = ['', 'Processing', 'Review', 'QA', 'Other'];
 
 const ALL_CLIENTS = ['MRO', 'Verisma', 'Datavant'];
 const CLIENT_ENDPOINTS = {
-  mro: 'mro-daily-allocation',
+  mro: 'mro-daily-allocations',
   verisma: 'verisma-daily-allocations',
   datavant: 'datavant-daily-allocations'
 };
@@ -238,7 +238,7 @@ const PreviousLoggedCases = () => {
 
       // Fetch all clients in parallel
       const [mroRes, verismaRes, datavantRes] = await Promise.allSettled([
-        axios.get(`${API_URL}/mro-daily-allocation/previous-cases?${params}`, getAuthHeaders()),
+        axios.get(`${API_URL}/mro-daily-allocations/previous-cases?${params}`, getAuthHeaders()),
         axios.get(`${API_URL}/verisma-daily-allocations/previous-cases?${params}`, getAuthHeaders()),
         axios.get(`${API_URL}/datavant-daily-allocations/previous-cases?${params}`, getAuthHeaders())
       ]);
@@ -1095,7 +1095,7 @@ const PreviousLoggedCases = () => {
                     <tr>
                       <th className="px-2 py-2 text-left font-semibold border-r">SR#</th>
                       <th className="px-2 py-2 text-left font-semibold border-r">Alloc. Date</th>
-                      <th className="px-2 py-2 text-left font-semibold border-r">Logged Date</th>
+                      <th className="px-2 py-2 text-left font-semibold border-r">System Captured Date</th>
                       <th className="px-2 py-2 text-left font-semibold border-r">Process</th>
                       <th className="px-2 py-2 text-left font-semibold border-r">Location</th>
                       {currentClientName === 'mro' && (
@@ -1129,7 +1129,7 @@ const PreviousLoggedCases = () => {
                           >
                             <td className="px-2 py-1.5 font-medium border-r">{caseItem.sr_no}</td>
                             <td className="px-2 py-1.5 border-r">{formatDate(caseItem.allocation_date)}</td>
-                            <td className="px-2 py-1.5 border-r">{formatDate(caseItem.logged_date)}</td>
+                            <td className="px-2 py-1.5 border-r">{formatDate(caseItem.system_captured_date || caseItem.logged_date)}</td>
                             <td className="px-2 py-1.5 border-r">
                               <span
                                 className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${

@@ -13,15 +13,16 @@ const API_URL = import.meta.env.VITE_BACKEND_URL;
 const MRO_REQUEST_TYPES = ['New Request', 'Follow up', 'Batch', 'DDS', 'E-link', 'E-Request'];
 const MRO_REQUESTOR_TYPES = ['NRS-NO Records', 'Manual', 'Other Processing (Canceled/Released By Other)', 'Processed', 'Processed through File Drop'];
 
-const MROAllocationPanel = ({ 
+const MROAllocationPanel = ({
   locations = [],  // DATE-FILTERED locations from parent
-  selectedDate, 
-  resourceInfo, 
+  selectedDate,
+  resourceInfo,
   geographyId,
   geographyName,
   allocations = [],  // Allocations for selectedDate
   onRefresh,
-  loading 
+  onDateChange,
+  loading
 }) => {
   // Form state
   const [formData, setFormData] = useState({
@@ -32,7 +33,26 @@ const MROAllocationPanel = ({
     requestor_type: '',
     processing_time: ''
   });
-  
+
+  // Local allocation date for the form (separate from parent's selectedDate)
+  const [formDate, setFormDate] = useState(selectedDate || '');
+
+  // Sync formDate when parent selectedDate changes
+  useEffect(() => {
+    if (selectedDate) setFormDate(selectedDate);
+  }, [selectedDate]);
+
+  // Min = first day of current month, Max = today (no future dates)
+  const { minDate, maxDate } = useMemo(() => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    return {
+      minDate: `${year}-${month}-01`,
+      maxDate: now.toLocaleDateString('en-CA')
+    };
+  }, []);
+
   // UI state
   const [submitting, setSubmitting] = useState(false);
   const [requestIdWarning, setRequestIdWarning] = useState(null);
@@ -111,27 +131,26 @@ const MROAllocationPanel = ({
 
   // Check if selected date is valid
   const dateValidation = useMemo(() => {
-    if (!selectedDate) return { valid: false, message: 'No date selected' };
-    
-    const selected = new Date(selectedDate);
-    selected.setHours(0, 0, 0, 0);
-    
+    if (!formDate) return { valid: false, message: 'No date selected' };
+
+    const selected = new Date(formDate + 'T00:00:00');
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    
+    selected.setHours(0, 0, 0, 0);
+
     if (selected > today) {
       return { valid: false, message: 'Cannot log entries for future dates' };
     }
-    
+
     const lastDayOfMonth = new Date(selected.getFullYear(), selected.getMonth() + 1, 0);
     lastDayOfMonth.setHours(23, 59, 59, 999);
-    
+
     if (new Date() > lastDayOfMonth) {
       return { valid: false, message: 'This month is locked. Cannot add new entries.' };
     }
-    
+
     return { valid: true, message: null };
-  }, [selectedDate]);
+  }, [formDate]);
 
   // Handle location selection - now searches in ALL locations
   const handleLocationChange = (subprojectId) => {
@@ -218,7 +237,7 @@ const MROAllocationPanel = ({
     try {
       await axios.post(`${API_URL}/mro-daily-allocations`, {
         subproject_id: formData.subproject_id,
-        allocation_date: selectedDate,
+        allocation_date: formDate,
         facility_name: formData.facility_name,
         request_id: formData.request_id,
         request_type: formData.request_type,
@@ -396,8 +415,18 @@ const MROAllocationPanel = ({
               {/* Form Row 1 */}
               <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 mb-3">
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Allocation Date</label>
-                  <input type="text" value={selectedDate} readOnly className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded bg-gray-50" />
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Allocation Date <span className="text-red-500">*</span></label>
+                  <input
+                    type="date"
+                    value={formDate}
+                    min={minDate}
+                    max={maxDate}
+                    onChange={(e) => {
+                      setFormDate(e.target.value);
+                      if (onDateChange) onDateChange(e.target.value);
+                    }}
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-green-500"
+                  />
                 </div>
                 
                 <div>

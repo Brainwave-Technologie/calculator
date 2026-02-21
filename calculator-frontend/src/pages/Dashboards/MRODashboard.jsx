@@ -276,28 +276,53 @@ const MRODashboard = () => {
       const fixedTypes = ['NRS-NO Records', 'Manual'];
       setAllTypes(fixedTypes);
 
+      // Build rate map from loaded subprojects (project configuration is the primary source)
+      // Subproject API returns requestor_types[]{name, rate} — NOT billing_rates[]{requestor_type, rate}
+      const subprojectRatesMap = {};
+      subprojects.forEach(sp => {
+        if (!sp._id) return;
+        const spKey = sp._id.toString();
+        // Support both field shapes returned by different API versions
+        const rtList = sp.requestor_types || sp.billing_rates || [];
+        const getRate = (typeName) => {
+          const entry = rtList.find(r => (r.name || r.requestor_type) === typeName);
+          return entry?.rate || 0;
+        };
+        subprojectRatesMap[spKey] = {
+          nrsRate: getRate('NRS-NO Records'),
+          manualRate: getRate('Manual')
+        };
+      });
+
       // First pass: determine NRS and Manual billing rates per location
-      // from correctly-rated cases (NRS-NO Records and Manual requestor types)
+      // Initialize from subproject config first, then override with allocation billing_rate if non-zero
       const locationRates = {};
       filtered.forEach(a => {
         if (a.process_type !== 'Processing') return;
         const key = a.subproject_id?.toString() || a.subproject_name;
-        if (!locationRates[key]) locationRates[key] = { nrsRate: 0, manualRate: 0 };
+        if (!locationRates[key]) {
+          // Seed from subproject billing_rates (from project config)
+          const spRates = subprojectRatesMap[a.subproject_id?.toString()] || {};
+          locationRates[key] = {
+            nrsRate: spRates.nrsRate || 0,
+            manualRate: spRates.manualRate || 0
+          };
+        }
+        // Also pick up rates from allocations that already have correct billing_rate
         if (a.requestor_type === 'NRS-NO Records' && a.billing_rate > 0) {
           locationRates[key].nrsRate = a.billing_rate;
         }
         if (a.requestor_type === 'Manual' && a.billing_rate > 0) {
           locationRates[key].manualRate = a.billing_rate;
         }
-        // Use 'Processed' billing_rate as fallback for manualRate if set
-        if (a.requestor_type === 'Processed' && a.billing_rate > 0 && !locationRates[key].manualRate) {
+        if ((a.requestor_type === 'Processed' || a.requestor_type === 'Processed through File Drop') && a.billing_rate > 0 && !locationRates[key].manualRate) {
           locationRates[key].manualRate = a.billing_rate;
         }
       });
 
       // Second pass: categorize all allocations into NRS-NO Records or Manual
-      // 'Processed' or 'Manual' requestor_type → Manual column (at Manual rate)
-      // All other requestor_types → NRS-NO Records column (at NRS rate)
+      // 'Processed', 'Manual', 'Processed through File Drop' → Manual column (at Manual rate)
+      // All other requestor_types (NRS-NO Records etc.) → NRS-NO Records column (at NRS rate)
       const locMap = new Map();
       filtered.forEach(a => {
         if (a.process_type !== 'Processing') return;
@@ -308,7 +333,8 @@ const MRODashboard = () => {
         const entry = locMap.get(key);
         const rates = locationRates[key] || { nrsRate: 0, manualRate: 0 };
 
-        const typeKey = (a.requestor_type === 'Processed' || a.requestor_type === 'Manual') ? 'Manual' : 'NRS-NO Records';
+        const isManualType = a.requestor_type === 'Processed' || a.requestor_type === 'Manual' || a.requestor_type === 'Processed through File Drop';
+        const typeKey = isManualType ? 'Manual' : 'NRS-NO Records';
         const rate = typeKey === 'Manual'
           ? (rates.manualRate || a.billing_rate || 0)
           : (rates.nrsRate || a.billing_rate || 0);
@@ -381,7 +407,7 @@ const MRODashboard = () => {
       });
       setLoggingTotals(totals);
     }
-  }, [activeView, searchTerm, filters.geography_id, filters.process_type, geographies]);
+  }, [activeView, searchTerm, filters.geography_id, filters.process_type, geographies, subprojects]);
 
   useEffect(() => {
     if (allocations.length > 0) processIntoSummary(allocations);

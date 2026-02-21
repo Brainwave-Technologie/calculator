@@ -7,6 +7,7 @@ const MRODailyAllocation = require('../../models/Allocations/MROdailyallocation'
 const MROAssignment = require('../../models/DailyAssignments/MROAssignment');
 const Resource = require('../../models/Resource');
 const Subproject = require('../../models/Subproject');
+const SubprojectRequestorType = require('../../models/SubprojectRequestorType');
 const ActivityLog = require('../../models/ActivityLog');
 const { sendDeleteRequestNotification, getAdminEmails, sendDeleteRequestNotification_Development } = require('../../services/emailNotifier'); 
 
@@ -78,10 +79,20 @@ router.post('/', verifyResourceToken, async (req, res) => {
                         subproject.project_name?.includes('Logging') ? 'Logging' : 
                         'MRO Payer Project';
     
-    // Get billing rate
+    // Get billing rate from SubprojectRequestorType collection
     let billingRate = 0;
     if (processType === 'Processing' && requestor_type) {
-      const rateEntry = subproject.billing_rates?.find(r => r.requestor_type === requestor_type);
+      let rateEntry = await SubprojectRequestorType.findOne({
+        subproject_id: subproject._id,
+        name: requestor_type
+      }).lean();
+      // For Processed types, fall back to Manual rate from project config
+      if (!rateEntry?.rate && (requestor_type === 'Processed' || requestor_type === 'Processed through File Drop')) {
+        rateEntry = await SubprojectRequestorType.findOne({
+          subproject_id: subproject._id,
+          name: 'Manual'
+        }).lean();
+      }
       billingRate = rateEntry?.rate || 0;
     } else if (processType === 'Logging') {
       billingRate = subproject.flatrate || 1.08;
@@ -91,7 +102,8 @@ router.post('/', verifyResourceToken, async (req, res) => {
     const allocation = new MRODailyAllocation({
       sr_no: srNo,
       allocation_date: new Date(allocation_date),
-      logged_date: new Date(),
+      logged_date: new Date(allocation_date),       // same as allocation_date (the work date resource selected)
+      system_captured_date: new Date(),             // actual server time when resource hit submit
       
       resource_id: req.resource._id,
       resource_name: req.resource.name,

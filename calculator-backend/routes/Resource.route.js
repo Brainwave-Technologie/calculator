@@ -213,112 +213,51 @@ router.get('/me', authenticateResource, async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════
 // GET: Locations for a specific client and date
-// 
-// CRITICAL LOGIC:
-// 1. Only returns locations assigned ON or BEFORE the target date
-// 2. If a location was logged on ANY previous date, it will NOT appear
-//    for dates AFTER the first log (prevents duplicate pending)
-// 3. For the SAME date as first log, location remains available for 
-//    multiple entries (handled by frontend)
+//
+// LOGIC: Returns ALL active locations assigned to the resource for the given client.
+// No assigned_date restriction - resource can log for any date in the current month.
+// The only restriction is that future dates are blocked.
 // ═══════════════════════════════════════════════════════════════
 router.get('/locations', authenticateResource, async (req, res) => {
   try {
     const { client, date } = req.query;
     const resource = req.resource;
-    
+
     if (!client) {
       return res.status(400).json({ message: 'Client parameter is required' });
     }
-    
+
     // Default to today if no date provided
     const targetDate = date ? new Date(date) : new Date();
     targetDate.setHours(0, 0, 0, 0);
-    
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    
+
     // Cannot get locations for future dates
     if (targetDate > today) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: 'Cannot view locations for future dates',
         locations: []
       });
     }
-    
+
     // ═══════════════════════════════════════════════════════════════
-    // STEP 1: Find locations that have been logged BEFORE the target date
-    // These should be EXCLUDED (they're "completed" for previous days)
-    // ═══════════════════════════════════════════════════════════════
-    let loggedLocationIds = new Set();
-    
-    // Import allocation models dynamically to avoid circular dependencies
-    const MRODailyAllocation = require('../models/Allocations/MROdailyallocation');
-    const VerismaDailyAllocation = require('../models/Allocations/Verismadailyallocation');
-    // const DatavantDailyAllocation = require('../models/Allocations/Datavantdailyallocation');
-    
-    // Get the appropriate allocation model
-    let AllocationModel = null;
-    if (client.toLowerCase() === 'mro') {
-      AllocationModel = MRODailyAllocation;
-    } else if (client.toLowerCase() === 'verisma') {
-      AllocationModel = VerismaDailyAllocation;
-    }
-    // Add Datavant when available:
-    // else if (client.toLowerCase() === 'datavant') {
-    //   AllocationModel = DatavantDailyAllocation;
-    // }
-    
-    if (AllocationModel) {
-      // Find all locations logged on ANY date BEFORE targetDate
-      const previousLogs = await AllocationModel.find({
-        resource_email: resource.email.toLowerCase(),
-        allocation_date: { $lt: targetDate },
-        is_deleted: { $ne: true }
-      }).distinct('subproject_id');
-      
-      previousLogs.forEach(id => {
-        if (id) loggedLocationIds.add(id.toString());
-      });
-    }
-    
-    // ═══════════════════════════════════════════════════════════════
-    // STEP 2: Build filtered locations list
+    // Build locations list: all active locations for this client
+    // No assigned_date restriction - resource can log for any date in current month
     // ═══════════════════════════════════════════════════════════════
     const locations = [];
-    
+
     for (const assignment of resource.assignments) {
       if (assignment.client_name?.toLowerCase() !== client.toLowerCase()) {
         continue;
       }
-      
+
       const filteredSubprojects = [];
-      
+
       for (const sp of assignment.subprojects || []) {
         if (sp.status && sp.status !== 'active') continue;
-        
-        const subprojectIdStr = sp.subproject_id?.toString();
-        
-        // ═══════════════════════════════════════════════════════════
-        // CHECK 1: If location was logged on a PREVIOUS date, exclude it
-        // This prevents it from appearing as "pending" on future dates
-        // ═══════════════════════════════════════════════════════════
-        if (loggedLocationIds.has(subprojectIdStr)) {
-          continue; // Skip - already logged on a previous date
-        }
-        
-        // ═══════════════════════════════════════════════════════════
-        // CHECK 2: assigned_date must be ON or BEFORE target date
-        // ═══════════════════════════════════════════════════════════
-        if (sp.assigned_date) {
-          const assignedDate = new Date(sp.assigned_date);
-          assignedDate.setHours(0, 0, 0, 0);
-          
-          if (assignedDate > targetDate) {
-            continue; // Location not yet assigned for this date
-          }
-        }
-        // If no assigned_date, assume it was assigned before tracking - allow access
-        
+
         filteredSubprojects.push({
           subproject_id: sp.subproject_id,
           subproject_name: sp.subproject_name,
@@ -326,7 +265,7 @@ router.get('/locations', authenticateResource, async (req, res) => {
           assigned_date: sp.assigned_date || null
         });
       }
-      
+
       if (filteredSubprojects.length > 0) {
         locations.push({
           geography_id: assignment.geography_id,
@@ -339,12 +278,11 @@ router.get('/locations', authenticateResource, async (req, res) => {
         });
       }
     }
-    
+
     res.json({
       success: true,
       target_date: targetDate.toISOString().split('T')[0],
       count: locations.reduce((sum, l) => sum + l.subprojects.length, 0),
-      excluded_previously_logged: loggedLocationIds.size,
       locations
     });
     

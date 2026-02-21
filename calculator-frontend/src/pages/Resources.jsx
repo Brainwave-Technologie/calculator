@@ -274,6 +274,81 @@ const ViewAssignmentsModal = React.memo(({ isOpen, onClose, resource }) => {
 });
 ViewAssignmentsModal.displayName = "ViewAssignmentsModal";
 
+// --- EDIT RESOURCE DETAILS MODAL ---
+const EditResourceDetailsModal = React.memo(({ isOpen, onClose, resource, onSave }) => {
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [role, setRole] = useState('associate');
+  const [errors, setErrors] = useState({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (isOpen && resource) {
+      setName(resource.name || '');
+      setEmail(resource.email || '');
+      setRole(resource.role || 'associate');
+      setErrors({});
+    }
+  }, [isOpen, resource]);
+
+  const handleSubmit = async () => {
+    const newErrors = {};
+    if (!name.trim()) newErrors.name = 'Name is required';
+    if (!email.trim()) newErrors.email = 'Email is required';
+    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) newErrors.email = 'Invalid email format';
+    if (Object.keys(newErrors).length > 0) { setErrors(newErrors); return; }
+    setIsSubmitting(true);
+    try {
+      await onSave({ name: name.trim(), email: email.trim(), role });
+      onClose();
+    } catch (error) { /* handled in onSave */ }
+    finally { setIsSubmitting(false); }
+  };
+
+  if (!isOpen || !resource) return null;
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-60 flex justify-center items-center z-50">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden flex flex-col">
+        <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between bg-gradient-to-r from-blue-50 to-indigo-50">
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-blue-100"><PencilSquareIcon className="w-6 h-6 text-blue-600" /></div>
+            <div><h2 className="text-lg font-bold text-gray-900">Edit Resource Details</h2><p className="text-sm text-gray-500">{resource.name} • {resource.email}</p></div>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-2 hover:bg-white rounded-lg transition"><XMarkIcon className="w-6 h-6" /></button>
+        </div>
+        <div className="p-6 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Name <span className="text-red-500">*</span></label>
+            <input type="text" value={name} onChange={(e) => { setName(e.target.value); if (errors.name) setErrors(p => ({ ...p, name: '' })); }} placeholder="Full name" className={`w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none ${errors.name ? 'border-red-300 bg-red-50' : 'border-gray-300'}`} />
+            {errors.name && <p className="mt-1 text-xs text-red-500">{errors.name}</p>}
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Email <span className="text-red-500">*</span></label>
+            <input type="email" value={email} onChange={(e) => { setEmail(e.target.value); if (errors.email) setErrors(p => ({ ...p, email: '' })); }} placeholder="Email address" className={`w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none ${errors.email ? 'border-red-300 bg-red-50' : 'border-gray-300'}`} />
+            {errors.email && <p className="mt-1 text-xs text-red-500">{errors.email}</p>}
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+            <select value={role} onChange={(e) => setRole(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white">
+              <option value="associate">Associate</option>
+              <option value="senior_associate">Senior Associate</option>
+              <option value="team_lead">Team Lead</option>
+              <option value="manager">Manager</option>
+            </select>
+          </div>
+        </div>
+        <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 flex justify-end gap-3">
+          <button onClick={onClose} disabled={isSubmitting} className="px-5 py-2.5 border border-gray-300 text-gray-700 rounded-xl hover:bg-gray-100 font-medium transition disabled:opacity-50">Cancel</button>
+          <button onClick={handleSubmit} disabled={isSubmitting} className="px-5 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 font-medium transition flex items-center gap-2 disabled:opacity-50">
+            {isSubmitting ? (<><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div><span>Saving...</span></>) : (<><PencilSquareIcon className="w-4 h-4" /><span>Save Details</span></>)}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+});
+EditResourceDetailsModal.displayName = "EditResourceDetailsModal";
+
 // --- ASSIGN LOCATIONS MODAL ---
 const AssignLocationsModal = React.memo(({ isOpen, onClose, resource, onSave }) => {
   const [assignments, setAssignments] = useState([]);
@@ -282,10 +357,6 @@ const AssignLocationsModal = React.memo(({ isOpen, onClose, resource, onSave }) 
   const [loadingGeo, setLoadingGeo] = useState(false);
   const [dropdownData, setDropdownData] = useState({});
   const [loadingStates, setLoadingStates] = useState({});
-  const [resourceName, setResourceName] = useState('');
-  const [resourceEmail, setResourceEmail] = useState('');
-  const [resourceRole, setResourceRole] = useState('associate');
-  const [resourceErrors, setResourceErrors] = useState({});
 
   const createEmptyAssignment = useCallback(() => ({
     id: `new-${Date.now()}-${Math.random()}`,
@@ -334,10 +405,6 @@ const AssignLocationsModal = React.memo(({ isOpen, onClose, resource, onSave }) 
 
   useEffect(() => {
     if (isOpen && resource) {
-      setResourceName(resource.name || '');
-      setResourceEmail(resource.email || '');
-      setResourceRole(resource.role || 'associate');
-      setResourceErrors({});
       const existingAssignments = resource.assignments || [];
       if (existingAssignments.length > 0) {
         const mapped = existingAssignments.map((a, idx) => ({
@@ -405,17 +472,10 @@ const AssignLocationsModal = React.memo(({ isOpen, onClose, resource, onSave }) 
   };
 
   const handleSubmit = async () => {
-    const newErrors = {};
-    if (!resourceName.trim()) newErrors.name = 'Name is required';
-    if (!resourceEmail.trim()) newErrors.email = 'Email is required';
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resourceEmail)) newErrors.email = 'Invalid email format';
-    if (Object.keys(newErrors).length > 0) { setResourceErrors(newErrors); return; }
-
     const validAssignments = assignments.filter(a => a.geography_id && a.client_id && a.project_id && a.selectedLocations.length > 0);
     if (validAssignments.length === 0) { toast.error("Please complete at least one assignment with locations selected"); return; }
     setIsSubmitting(true);
     try {
-      await apiService.updateResource(resource._id, { name: resourceName.trim(), email: resourceEmail.trim(), role: resourceRole });
       const formattedAssignments = validAssignments.map(a => ({ geography_id: a.geography_id, geography_name: a.geography_name, client_id: a.client_id, client_name: a.client_name, project_id: a.project_id, project_name: a.project_name, subprojects: a.subprojects }));
       await onSave(formattedAssignments);
       onClose();
@@ -431,36 +491,11 @@ const AssignLocationsModal = React.memo(({ isOpen, onClose, resource, onSave }) 
         <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between bg-gradient-to-r from-green-50 to-emerald-50">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-lg bg-green-100"><PencilSquareIcon className="w-6 h-6 text-green-600" /></div>
-            <div><h2 className="text-lg font-bold text-gray-900">Edit Resource</h2><p className="text-sm text-gray-500">{resource.name} • {resource.email}</p></div>
+            <div><h2 className="text-lg font-bold text-gray-900">Edit Assignments</h2><p className="text-sm text-gray-500">{resource.name} • {resource.email}</p></div>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-2 hover:bg-white rounded-lg transition"><XMarkIcon className="w-6 h-6" /></button>
         </div>
         <div className="flex-1 overflow-y-auto p-6">
-          {/* Resource Details Section */}
-          <div className="border border-blue-200 rounded-xl p-4 bg-blue-50 mb-4">
-            <h3 className="text-sm font-semibold text-blue-800 mb-3">Resource Details</h3>
-            <div className="grid grid-cols-3 gap-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Name <span className="text-red-500">*</span></label>
-                <input type="text" value={resourceName} onChange={(e) => { setResourceName(e.target.value); if (resourceErrors.name) setResourceErrors(prev => ({ ...prev, name: '' })); }} placeholder="Full name" className={`w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none ${resourceErrors.name ? 'border-red-300 bg-red-50' : 'border-gray-300 bg-white'}`} />
-                {resourceErrors.name && <p className="mt-1 text-xs text-red-500">{resourceErrors.name}</p>}
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Email <span className="text-red-500">*</span></label>
-                <input type="email" value={resourceEmail} onChange={(e) => { setResourceEmail(e.target.value); if (resourceErrors.email) setResourceErrors(prev => ({ ...prev, email: '' })); }} placeholder="Email address" className={`w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none ${resourceErrors.email ? 'border-red-300 bg-red-50' : 'border-gray-300 bg-white'}`} />
-                {resourceErrors.email && <p className="mt-1 text-xs text-red-500">{resourceErrors.email}</p>}
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Role</label>
-                <select value={resourceRole} onChange={(e) => setResourceRole(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white">
-                  <option value="associate">Associate</option>
-                  <option value="senior_associate">Senior Associate</option>
-                  <option value="team_lead">Team Lead</option>
-                  <option value="manager">Manager</option>
-                </select>
-              </div>
-            </div>
-          </div>
           <div className="space-y-4">
             {assignments.map((assignment, index) => (
               <div key={assignment.id} className="border border-gray-200 rounded-xl p-4 bg-gray-50">
@@ -708,6 +743,7 @@ export default function ResourcesPage() {
   const [showFormatInfo, setShowFormatInfo] = useState(false);
   const [viewAssignmentsModal, setViewAssignmentsModal] = useState({ isOpen: false, resource: null });
   const [assignLocationsModal, setAssignLocationsModal] = useState({ isOpen: false, resource: null });
+  const [editDetailsModal, setEditDetailsModal] = useState({ isOpen: false, resource: null });
   const [addResourceModal, setAddResourceModal] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(10);
@@ -815,6 +851,12 @@ const fetchResources = useCallback(async () => {
     catch (error) { console.error("Failed to update assignments:", error); toast.error(error.response?.data?.message || "Failed to update assignments"); throw error; }
   }, [assignLocationsModal.resource, fetchResources]);
 
+  const handleUpdateResourceDetails = useCallback(async (data) => {
+    if (!editDetailsModal.resource?._id) return;
+    try { await apiService.updateResource(editDetailsModal.resource._id, data); toast.success("Resource updated successfully"); fetchResources(); }
+    catch (error) { console.error("Failed to update resource:", error); toast.error(error.response?.data?.message || "Failed to update resource"); throw error; }
+  }, [editDetailsModal.resource, fetchResources]);
+
   const handleDeleteResource = useCallback(async (id) => {
     try { await apiService.deleteResource(id); toast.success("Resource deleted successfully"); fetchResources(); }
     catch (error) { console.error("Failed to delete resource:", error); toast.error("Failed to delete resource"); }
@@ -877,6 +919,7 @@ const handleItemsPerPageChange = useCallback((e) => {
   return (
     <>
       <ViewAssignmentsModal isOpen={viewAssignmentsModal.isOpen} onClose={() => setViewAssignmentsModal({ isOpen: false, resource: null })} resource={viewAssignmentsModal.resource} />
+      <EditResourceDetailsModal isOpen={editDetailsModal.isOpen} onClose={() => setEditDetailsModal({ isOpen: false, resource: null })} resource={editDetailsModal.resource} onSave={handleUpdateResourceDetails} />
       <AssignLocationsModal isOpen={assignLocationsModal.isOpen} onClose={() => setAssignLocationsModal({ isOpen: false, resource: null })} resource={assignLocationsModal.resource} onSave={handleSaveAssignments} />
       <AddResourceModal isOpen={addResourceModal} onClose={() => setAddResourceModal(false)} onSave={handleAddResource} />
       
@@ -958,7 +1001,8 @@ const handleItemsPerPageChange = useCallback((e) => {
                       <td className="px-6 py-3 whitespace-nowrap"><AssignmentBadge assignments={res.assignments} onClick={() => setViewAssignmentsModal({ isOpen: true, resource: res })} /></td>
                       <td className="px-6 py-3 whitespace-nowrap">
                         <div className="flex items-center justify-center space-x-1">
-                          <button onClick={() => setAssignLocationsModal({ isOpen: true, resource: res })} className="p-1.5 text-green-600 hover:bg-green-100 rounded-lg transition" title="Assign Locations"><PencilSquareIcon className="w-5 h-5" /></button>
+                          <button onClick={() => setEditDetailsModal({ isOpen: true, resource: res })} className="p-1.5 text-blue-600 hover:bg-blue-100 rounded-lg transition" title="Edit Details"><PencilSquareIcon className="w-5 h-5" /></button>
+                          <button onClick={() => setAssignLocationsModal({ isOpen: true, resource: res })} className="p-1.5 text-green-600 hover:bg-green-100 rounded-lg transition" title="Edit Assignments"><MapPinIcon className="w-5 h-5" /></button>
                           <button onClick={() => { setConfirmDeleteResource(true); setResourceId(res._id); }} className="p-1.5 text-red-500 hover:bg-red-100 rounded-lg transition" title="Delete Resource"><TrashIcon className="w-5 h-5" /></button>
                         </div>
                       </td>

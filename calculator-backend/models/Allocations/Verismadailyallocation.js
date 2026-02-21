@@ -43,6 +43,8 @@ const VerismaDailyAllocationSchema = new mongoose.Schema({
   // ============ DATE FIELDS ============
   allocation_date: { type: Date, required: true, index: true },
   logged_date: { type: Date, index: true },
+  // System Captured Date = exact timestamp when the system captured the entry
+  system_captured_date: { type: Date, index: true },
   day: { type: Number, min: 1, max: 31 },
   month: { type: Number, min: 1, max: 12, index: true },
   year: { type: Number, index: true },
@@ -170,23 +172,28 @@ VerismaDailyAllocationSchema.pre('save', function(next) {
     this.year = date.getFullYear();
   }
   
+  // logged_date = same as allocation_date (the work date resource selected)
   if (!this.logged_date) {
-    this.logged_date = new Date();
+    this.logged_date = this.allocation_date || new Date();
   }
-  
-  // Check if late log
-  if (this.allocation_date && this.logged_date) {
+  // system_captured_date = actual server time when resource hit submit
+  if (!this.system_captured_date) {
+    this.system_captured_date = new Date();
+  }
+
+  // is_late_log: resource submitted to system (system_captured_date) after the allocation_date
+  if (this.allocation_date && this.system_captured_date) {
     const allocDate = new Date(this.allocation_date);
     allocDate.setHours(0, 0, 0, 0);
-    const logDate = new Date(this.logged_date);
-    logDate.setHours(0, 0, 0, 0);
-    
-    if (logDate > allocDate) {
+    const capturedDate = new Date(this.system_captured_date);
+    capturedDate.setHours(0, 0, 0, 0);
+
+    if (capturedDate > allocDate) {
       this.is_late_log = true;
-      this.days_late = Math.floor((logDate - allocDate) / (1000 * 60 * 60 * 24));
+      this.days_late = Math.floor((capturedDate - allocDate) / (1000 * 60 * 60 * 24));
     }
   }
-  
+
   // Generate subproject_key
   if (!this.subproject_key && this.client_name && this.project_name && this.subproject_name) {
     this.subproject_key = [

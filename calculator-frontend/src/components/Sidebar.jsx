@@ -20,7 +20,7 @@ const navItems = [
   {name: "Processing Payout", icon: CurrencyDollarIcon, path: "/processing-payout"},
   { name: "Resources", icon: UsersIcon, path: "/resources" },
   { name: "Productivity", icon: FaChartBar, path: "/productivity" },
-  { name: "Costing", icon: CurrencyDollarIcon, path: "/costing" },
+  // { name: "Costing", icon: CurrencyDollarIcon, path: "/costing" },
   { name: "Datavant", icon: FiDatabase, path: "/datavant-dashboard" },
   // { name: "Invoices", icon: Cog6ToothIcon, path: "/invoices" },
   { name: "Payout Calculator", icon: CalculatorIcon, path: "/payout/calculator" },

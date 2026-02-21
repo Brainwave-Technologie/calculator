@@ -113,14 +113,18 @@ async function getVerismaProcessingPayout(month, year) {
   };
 }
 
+// Default payout rates for special MRO requestor types (overridable via query params)
+const NRS_PAYOUT_RATE = 0.50;          // NRS-NO Records
+const OTHER_PROCESSING_PAYOUT_RATE = 0.20; // Other Processing (Canceled/Released By Other)
+
 // Get MRO Processing Payout
-async function getMROProcessingPayout(month, year) {
+async function getMROProcessingPayout(month, year, nrsRate = NRS_PAYOUT_RATE, otherProcessingRate = OTHER_PROCESSING_PAYOUT_RATE) {
   const startDate = new Date(year, month - 1, 1);
   const endDate = new Date(year, month, 0, 23, 59, 59, 999);
 
   // Step 1: Get ALL subprojects with flatrate FIRST
   const allSubprojects = await Subproject.find({}).select('_id name flatrate').lean();
-  
+
   const subprojectFlatrateMap = {};
   allSubprojects.forEach(sp => {
     subprojectFlatrateMap[sp._id.toString()] = {
@@ -143,36 +147,64 @@ async function getMROProcessingPayout(month, year) {
     const spId = alloc.subproject_id?.toString();
     if (!spId) return;
 
-    // Get flatrate from our pre-fetched map - THIS IS THE KEY FIX
     const subprojectData = subprojectFlatrateMap[spId];
-    const flatrate = subprojectData?.flatrate || 0;
     const locationName = alloc.subproject_name || subprojectData?.name || 'Unknown';
     const resourceName = alloc.resource_name;
+    const requestorType = alloc.requestor_type || '';
 
-    if (!locationMap[spId]) {
-      locationMap[spId] = {
-        location_id: spId,
-        location_name: locationName,
-        flatrate: flatrate,
+    // Determine row key, label and effective payout rate based on requestor type:
+    // - NRS-NO Records → fixed $0.50 (aggregated across all locations)
+    // - Other Processing (Canceled/Released By Other) → fixed $0.20 (aggregated)
+    // - Processed / Manual / Processed through File Drop → location flatrate
+    let rowKey, rowName, effectiveRate, isFixedRate;
+
+    if (requestorType === 'NRS-NO Records') {
+      rowKey = '__NRS__';
+      rowName = 'NRS-NO Records';
+      effectiveRate = nrsRate;
+      isFixedRate = true;
+    } else if (requestorType === 'Other Processing (Canceled/Released By Other)') {
+      rowKey = '__OTHER_PROCESSING__';
+      rowName = 'Other Processing (Canceled/Released By Other)';
+      effectiveRate = otherProcessingRate;
+      isFixedRate = true;
+    } else {
+      // Processed, Manual, Processed through File Drop → use location flatrate
+      rowKey = spId;
+      rowName = locationName;
+      effectiveRate = subprojectData?.flatrate || 0;
+      isFixedRate = false;
+    }
+
+    if (!locationMap[rowKey]) {
+      locationMap[rowKey] = {
+        location_id: rowKey,
+        location_name: rowName,
+        flatrate: effectiveRate,
+        is_fixed_rate: isFixedRate,
         resource_cases: {},
         total_cases: 0,
         total_payout: 0
       };
     }
 
-    if (!locationMap[spId].resource_cases[resourceName]) {
-      locationMap[spId].resource_cases[resourceName] = 0;
+    if (!locationMap[rowKey].resource_cases[resourceName]) {
+      locationMap[rowKey].resource_cases[resourceName] = 0;
     }
-    locationMap[spId].resource_cases[resourceName] += 1;
-    locationMap[spId].total_cases += 1;
+    locationMap[rowKey].resource_cases[resourceName] += 1;
+    locationMap[rowKey].total_cases += 1;
   });
 
-  // Calculate payouts
+  // Calculate payouts using effective rate per row
   Object.values(locationMap).forEach(loc => {
     loc.total_payout = loc.total_cases * loc.flatrate;
   });
 
-  const locations = Object.values(locationMap).sort((a, b) => a.location_name.localeCompare(b.location_name));
+  // Sort: standard location rows first (alphabetical), fixed-rate rows at the bottom
+  const locations = Object.values(locationMap).sort((a, b) => {
+    if (a.is_fixed_rate !== b.is_fixed_rate) return a.is_fixed_rate ? 1 : -1;
+    return a.location_name.localeCompare(b.location_name);
+  });
 
   const resourceTotals = {};
   uniqueResources.forEach(name => { resourceTotals[name] = { cases: 0, payout: 0 }; });
@@ -212,9 +244,13 @@ router.get('/verisma', async (req, res) => {
 
 router.get('/mro', async (req, res) => {
   try {
+    const nrsRate = parseFloat(req.query.nrs_rate) > 0 ? parseFloat(req.query.nrs_rate) : NRS_PAYOUT_RATE;
+    const otherRate = parseFloat(req.query.other_processing_rate) > 0 ? parseFloat(req.query.other_processing_rate) : OTHER_PROCESSING_PAYOUT_RATE;
     const data = await getMROProcessingPayout(
       parseInt(req.query.month) || new Date().getMonth() + 1,
-      parseInt(req.query.year) || new Date().getFullYear()
+      parseInt(req.query.year) || new Date().getFullYear(),
+      nrsRate,
+      otherRate
     );
     res.json({ success: true, ...data });
   } catch (err) {
@@ -226,10 +262,12 @@ router.get('/combined', async (req, res) => {
   try {
     const monthNum = parseInt(req.query.month) || new Date().getMonth() + 1;
     const yearNum = parseInt(req.query.year) || new Date().getFullYear();
+    const nrsRate = parseFloat(req.query.nrs_rate) > 0 ? parseFloat(req.query.nrs_rate) : NRS_PAYOUT_RATE;
+    const otherRate = parseFloat(req.query.other_processing_rate) > 0 ? parseFloat(req.query.other_processing_rate) : OTHER_PROCESSING_PAYOUT_RATE;
 
     const [verisma, mro] = await Promise.all([
       getVerismaProcessingPayout(monthNum, yearNum),
-      getMROProcessingPayout(monthNum, yearNum)
+      getMROProcessingPayout(monthNum, yearNum, nrsRate, otherRate)
     ]);
 
     res.json({
@@ -254,10 +292,12 @@ router.get('/export/:client', async (req, res) => {
     const { client } = req.params;
     const monthNum = parseInt(req.query.month) || new Date().getMonth() + 1;
     const yearNum = parseInt(req.query.year) || new Date().getFullYear();
+    const nrsRate = parseFloat(req.query.nrs_rate) > 0 ? parseFloat(req.query.nrs_rate) : NRS_PAYOUT_RATE;
+    const otherRate = parseFloat(req.query.other_processing_rate) > 0 ? parseFloat(req.query.other_processing_rate) : OTHER_PROCESSING_PAYOUT_RATE;
 
-    const data = client.toLowerCase() === 'verisma' 
+    const data = client.toLowerCase() === 'verisma'
       ? await getVerismaProcessingPayout(monthNum, yearNum)
-      : await getMROProcessingPayout(monthNum, yearNum);
+      : await getMROProcessingPayout(monthNum, yearNum, nrsRate, otherRate);
 
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet(`${client} Payout`, { views: [{ state: 'frozen', xSplit: 2, ySplit: 1 }] });
@@ -298,10 +338,12 @@ router.get('/export-combined', async (req, res) => {
   try {
     const monthNum = parseInt(req.query.month) || new Date().getMonth() + 1;
     const yearNum = parseInt(req.query.year) || new Date().getFullYear();
+    const nrsRate = parseFloat(req.query.nrs_rate) > 0 ? parseFloat(req.query.nrs_rate) : NRS_PAYOUT_RATE;
+    const otherRate = parseFloat(req.query.other_processing_rate) > 0 ? parseFloat(req.query.other_processing_rate) : OTHER_PROCESSING_PAYOUT_RATE;
 
     const [verisma, mro] = await Promise.all([
       getVerismaProcessingPayout(monthNum, yearNum),
-      getMROProcessingPayout(monthNum, yearNum)
+      getMROProcessingPayout(monthNum, yearNum, nrsRate, otherRate)
     ]);
 
     const workbook = new ExcelJS.Workbook();

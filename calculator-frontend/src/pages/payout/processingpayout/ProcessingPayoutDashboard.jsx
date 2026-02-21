@@ -44,23 +44,28 @@ const PayoutTable = ({ data, isLoading }) => {
           </tr>
         </thead>
         <tbody>
-          {locations.map((loc, idx) => (
-            <tr key={idx} className="hover:bg-gray-50">
-              <td className="sticky left-0 z-10 bg-orange-100 border border-gray-300 px-2 py-1 font-medium">{loc.location_name}</td>
-              <td className="sticky left-[160px] z-10 bg-yellow-100 border border-gray-300 px-2 py-1 text-center font-medium">
-                {formatCurrency(loc.flatrate)}
-              </td>
-              {resources.map((resourceName, rIdx) => {
-                const cases = loc.resource_cases[resourceName] || 0;
-                return (
-                  <td key={rIdx} className={`border border-gray-300 px-1 py-1 text-center ${cases > 0 ? 'bg-green-100 font-medium' : 'text-gray-400'}`}>
-                    {cases}
-                  </td>
-                );
-              })}
-              <td className="bg-green-100 border border-gray-300 px-2 py-1 text-center font-bold">{loc.total_cases}</td>
-            </tr>
-          ))}
+          {locations.map((loc, idx) => {
+            const isFixed = loc.is_fixed_rate;
+            return (
+              <tr key={idx} className={isFixed ? 'hover:bg-red-50' : 'hover:bg-gray-50'}>
+                <td className={`sticky left-0 z-10 border border-gray-300 px-2 py-1 font-medium ${isFixed ? 'bg-red-100 text-red-800' : 'bg-orange-100'}`}>
+                  {loc.location_name}
+                </td>
+                <td className={`sticky left-[160px] z-10 border border-gray-300 px-2 py-1 text-center font-semibold ${isFixed ? 'bg-red-200 text-red-700' : 'bg-yellow-100'}`}>
+                  {formatCurrency(loc.flatrate)}
+                </td>
+                {resources.map((resourceName, rIdx) => {
+                  const cases = loc.resource_cases[resourceName] || 0;
+                  return (
+                    <td key={rIdx} className={`border border-gray-300 px-1 py-1 text-center ${cases > 0 ? (isFixed ? 'bg-red-100 font-medium text-red-800' : 'bg-green-100 font-medium') : 'text-gray-400'}`}>
+                      {cases}
+                    </td>
+                  );
+                })}
+                <td className={`border border-gray-300 px-2 py-1 text-center font-bold ${isFixed ? 'bg-red-200' : 'bg-green-100'}`}>{loc.total_cases}</td>
+              </tr>
+            );
+          })}
           {/* Total Row */}
           <tr className="bg-orange-200 font-bold">
             <td className="sticky left-0 z-10 bg-orange-200 border border-gray-300 px-2 py-1.5">Total processing</td>
@@ -99,12 +104,18 @@ const ProcessingPayoutDashboard = () => {
   const [mroData, setMroData] = useState(null);
   const [combinedTotals, setCombinedTotals] = useState({ cases: 0, payout: 0 });
 
+  // MRO special requestor type rates (editable)
+  const [nrsRate, setNrsRate] = useState(0.50);
+  const [otherProcessingRate, setOtherProcessingRate] = useState(0.20);
+
   const formatCurrency = (amount) => `$${(amount || 0).toFixed(2)}`;
 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const response = await fetch(`${apiBaseUrl}/processing-payout/combined?month=${month}&year=${year}`);
+      const response = await fetch(
+        `${apiBaseUrl}/processing-payout/combined?month=${month}&year=${year}&nrs_rate=${nrsRate}&other_processing_rate=${otherProcessingRate}`
+      );
       if (!response.ok) throw new Error('Failed to fetch');
       const data = await response.json();
       setVerismaData(data.verisma);
@@ -115,12 +126,15 @@ const ProcessingPayoutDashboard = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [month, year]);
+  }, [month, year, nrsRate, otherProcessingRate]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleExport = (client) => {
-    window.open(`${apiBaseUrl}/processing-payout/export/${client}?month=${month}&year=${year}`, '_blank');
+    window.open(
+      `${apiBaseUrl}/processing-payout/export/${client}?month=${month}&year=${year}&nrs_rate=${nrsRate}&other_processing_rate=${otherProcessingRate}`,
+      '_blank'
+    );
   };
 
   const currentData = activeTab === 'verisma' ? verismaData : mroData;
@@ -128,12 +142,38 @@ const ProcessingPayoutDashboard = () => {
   return (
     <div className="bg-gray-50 min-h-screen text-sm">
       {/* Compact Header */}
-      <div className="bg-indigo-600 text-white px-3 py-2 flex items-center justify-between">
+      <div className="bg-indigo-600 text-white px-3 py-2 flex items-center justify-between flex-wrap gap-2">
         <div>
           <h1 className="text-base font-semibold">Processing Payout</h1>
           <p className="text-xs opacity-80">Payout = Cases × Payout Rate</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* MRO Special Rates */}
+          <div className="flex items-center gap-1 bg-white/10 rounded px-2 py-1">
+            <span className="text-xs opacity-80 whitespace-nowrap">NRS Rate $</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={nrsRate}
+              onChange={(e) => setNrsRate(parseFloat(e.target.value) || 0)}
+              className="w-14 px-1 py-0.5 text-xs border border-white/30 rounded text-gray-800 bg-white"
+              title="NRS-NO Records payout rate per case"
+            />
+          </div>
+          <div className="flex items-center gap-1 bg-white/10 rounded px-2 py-1">
+            <span className="text-xs opacity-80 whitespace-nowrap">Other Proc. $</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={otherProcessingRate}
+              onChange={(e) => setOtherProcessingRate(parseFloat(e.target.value) || 0)}
+              className="w-14 px-1 py-0.5 text-xs border border-white/30 rounded text-gray-800 bg-white"
+              title="Other Processing (Canceled/Released By Other) payout rate per case"
+            />
+          </div>
+          <div className="w-px h-5 bg-white/30"></div>
           <select value={month} onChange={(e) => setMonth(parseInt(e.target.value))}
             className="px-2 py-1 text-xs border rounded text-gray-800">
             {Array.from({ length: 12 }, (_, i) => (
@@ -174,7 +214,7 @@ const ProcessingPayoutDashboard = () => {
             className="px-2 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded text-xs disabled:opacity-50">
             📥 Export {activeTab === 'verisma' ? 'Verisma' : 'MRO'}
           </button>
-          <button onClick={() => window.open(`${apiBaseUrl}/processing-payout/export-combined?month=${month}&year=${year}`, '_blank')}
+          <button onClick={() => window.open(`${apiBaseUrl}/processing-payout/export-combined?month=${month}&year=${year}&nrs_rate=${nrsRate}&other_processing_rate=${otherProcessingRate}`, '_blank')}
             className="px-2 py-1 bg-purple-500 hover:bg-purple-600 text-white rounded text-xs">
             📥 Export Combined
           </button>

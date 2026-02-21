@@ -578,9 +578,11 @@ const handleDeleteGeography = (geography, e) => {
   // ==================== RENDER LOCATION TABLE ====================
   const renderLocationTable = (subprojects, isMRO, projectName, projectId, subprojectCache, clientName) => {
     const isDatavant = clientName?.toLowerCase() === 'datavant';
+    const isVerisma = clientName?.toLowerCase() === 'verisma';
     const isProcessing = !isDatavant && projectName?.toLowerCase() === 'processing';
     const isLogging = !isDatavant && projectName?.toLowerCase() === 'logging';
     const isPayer = !isDatavant && projectName?.toLowerCase().includes('payer');
+    const isVerismaProcessing = isVerisma && isProcessing;
 
     const currentPageNum = subprojectCache?.page || 1;
     const totalPages = subprojectCache?.totalPages || 1;
@@ -639,13 +641,20 @@ const handleDeleteGeography = (geography, e) => {
               ) : isMRO && (isLogging || isPayer) ? (
                 /* MRO Logging/Payer - Show Billing Rate */
                 <th className="px-4 py-2 text-right font-semibold text-emerald-600">Billing Rate</th>
-              ) : (
-                /* Verisma - Show Request Types */
+              ) : isVerismaProcessing ? (
+                /* Verisma Processing - Show Request Types + Payout Rate */
                 <>
                   <th className="px-4 py-2 text-right font-semibold text-blue-600">New Request</th>
                   <th className="px-4 py-2 text-right font-semibold text-purple-600">Key</th>
                   <th className="px-4 py-2 text-right font-semibold text-orange-600">Duplicate</th>
-                  <th className="px-4 py-2 text-right font-semibold">Rate</th>
+                  <th className="px-4 py-2 text-right font-semibold text-green-600">Payout Rate</th>
+                </>
+              ) : (
+                /* Verisma Other Projects - Show Request Types only (no Rate) */
+                <>
+                  <th className="px-4 py-2 text-right font-semibold text-blue-600">New Request</th>
+                  <th className="px-4 py-2 text-right font-semibold text-purple-600">Key</th>
+                  <th className="px-4 py-2 text-right font-semibold text-orange-600">Duplicate</th>
                 </>
               )}
               
@@ -655,7 +664,7 @@ const handleDeleteGeography = (geography, e) => {
           <tbody>
             {isLoadingPage ? (
               <tr>
-                <td colSpan={isDatavant ? 4 : isMRO && isProcessing ? 5 : isMRO && (isLogging || isPayer) ? 3 : 6} className="px-4 py-8 text-center">
+                <td colSpan={isDatavant ? 4 : isMRO && isProcessing ? 5 : isMRO && (isLogging || isPayer) ? 3 : isVerismaProcessing ? 6 : 5} className="px-4 py-8 text-center">
                   <div className="flex justify-center items-center gap-2">
                     <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
                     <span className="text-gray-500">Loading...</span>
@@ -718,7 +727,7 @@ const handleDeleteGeography = (geography, e) => {
                     <td className="px-4 py-2 text-right text-emerald-700 font-semibold">
                       {flatRate > 0 ? `$${flatRate.toFixed(2)}` : "-"}
                     </td>
-                  ) : (
+                  ) : isVerismaProcessing ? (
                     <>
                       <td className="px-4 py-2 text-right">
                         {newReqRate > 0 ? `$${newReqRate.toFixed(2)}` : "-"}
@@ -729,8 +738,20 @@ const handleDeleteGeography = (geography, e) => {
                       <td className="px-4 py-2 text-right">
                         {dupRate > 0 ? `$${dupRate.toFixed(2)}` : "-"}
                       </td>
-                      <td className="px-4 py-2 text-right">
+                      <td className="px-4 py-2 text-right text-green-700 font-semibold">
                         {flatRate > 0 ? `$${flatRate.toFixed(2)}` : "-"}
+                      </td>
+                    </>
+                  ) : (
+                    <>
+                      <td className="px-4 py-2 text-right">
+                        {newReqRate > 0 ? `$${newReqRate.toFixed(2)}` : "-"}
+                      </td>
+                      <td className="px-4 py-2 text-right">
+                        {keyRate > 0 ? `$${keyRate.toFixed(2)}` : "-"}
+                      </td>
+                      <td className="px-4 py-2 text-right">
+                        {dupRate > 0 ? `$${dupRate.toFixed(2)}` : "-"}
                       </td>
                     </>
                   )}

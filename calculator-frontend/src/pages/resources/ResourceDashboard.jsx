@@ -264,6 +264,7 @@ const ResourceDashboard = () => {
       geographyName,
       allocations,
       onRefresh: handleRefresh,
+      onDateChange: handleDateChange,
       loading: loadingAllocations || loadingLocations
     };
     
@@ -422,7 +423,7 @@ const ResourceDashboard = () => {
                 {locations.reduce((sum, l) => sum + (l.subprojects?.length || 0), 0)} location(s) available for {selectedDate}
                 {locations.length === 0 && (
                   <span className="text-yellow-600 ml-2">
-                    (All locations may have been logged on previous dates)
+                    (No locations assigned — contact admin)
                   </span>
                 )}
               </div>
