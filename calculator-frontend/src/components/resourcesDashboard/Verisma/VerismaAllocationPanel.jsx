@@ -1,9 +1,9 @@
 // src/components/resourcesDashboard/Verisma/VerismaAllocationPanel.jsx
 // UPDATED: 
+// - Fixed date validation to use local date comparison
 // - Allows multiple entries per location per day (same Request ID logic)
+// - CHANGED ORDER: Process dropdown first, then Location filtered by Process
 // - "Pending" = locations not yet logged for this selected date
-// - Location dropdown shows ALL assigned locations (with entry count indicator)
-// - Once logged on ANY date, location won't appear as "pending" on future dates
 import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { toast } from 'react-hot-toast';
@@ -27,8 +27,9 @@ const VerismaAllocationPanel = ({
   onRefresh,
   loading 
 }) => {
-  // Form state
+  // Form state - UPDATED: Added selectedProcess
   const [formData, setFormData] = useState({
+    selectedProcess: '',  // NEW: Process selection first
     subproject_id: '',
     facility: '',
     request_id: '',
@@ -82,16 +83,40 @@ const VerismaAllocationPanel = ({
   }, [locations]);
 
   // ═══════════════════════════════════════════════════════════════
-  // AVAILABLE LOCATIONS: ALL assigned locations (for multiple entries)
-  // Show all locations in dropdown - user can add multiple Request IDs
+  // GET UNIQUE PROCESSES (for Process dropdown)
   // ═══════════════════════════════════════════════════════════════
-  const availableLocations = useMemo(() => {
-    return allAssignedLocations;
+  const availableProcesses = useMemo(() => {
+    const processMap = new Map();
+    
+    allAssignedLocations.forEach(loc => {
+      if (loc.project_id && loc.project_name) {
+        processMap.set(loc.project_id, {
+          project_id: loc.project_id,
+          project_name: loc.project_name
+        });
+      }
+    });
+    
+    return Array.from(processMap.values()).sort((a, b) => 
+      a.project_name.localeCompare(b.project_name)
+    );
   }, [allAssignedLocations]);
 
   // ═══════════════════════════════════════════════════════════════
+  // LOCATIONS FILTERED BY SELECTED PROCESS
+  // ═══════════════════════════════════════════════════════════════
+  const locationsForSelectedProcess = useMemo(() => {
+    if (!formData.selectedProcess) {
+      return [];
+    }
+    
+    return allAssignedLocations.filter(loc => 
+      loc.project_id === formData.selectedProcess
+    );
+  }, [allAssignedLocations, formData.selectedProcess]);
+
+  // ═══════════════════════════════════════════════════════════════
   // PENDING LOCATIONS: Locations that have NO entries for selected date
-  // These are "pending" because they need at least one entry
   // ═══════════════════════════════════════════════════════════════
   const pendingLocations = useMemo(() => {
     const loggedSubprojectIds = new Set(
@@ -115,33 +140,51 @@ const VerismaAllocationPanel = ({
     return counts;
   }, [allocations]);
 
-  // Check if selected date is valid
+  // ═══════════════════════════════════════════════════════════════
+  // FIXED DATE VALIDATION - Using local date string comparison
+  // ═══════════════════════════════════════════════════════════════
   const dateValidation = useMemo(() => {
     if (!selectedDate) return { valid: false, message: 'No date selected' };
     
-    const selected = new Date(selectedDate);
-    selected.setHours(0, 0, 0, 0);
-    
+    // Get today's date in YYYY-MM-DD format (local time)
     const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const todayStr = today.toLocaleDateString('en-CA'); // Returns YYYY-MM-DD format
     
-    if (selected > today) {
+    // selectedDate is already in YYYY-MM-DD format
+    const selectedStr = selectedDate;
+    
+    // String comparison works for YYYY-MM-DD format
+    if (selectedStr > todayStr) {
       return { valid: false, message: 'Cannot log entries for future dates' };
     }
     
+    // Check if month is locked (past month-end)
+    const selected = new Date(selectedDate + 'T00:00:00');
     const lastDayOfMonth = new Date(selected.getFullYear(), selected.getMonth() + 1, 0);
-    lastDayOfMonth.setHours(23, 59, 59, 999);
+    const lastDayStr = lastDayOfMonth.toLocaleDateString('en-CA');
     
-    if (new Date() > lastDayOfMonth) {
+    if (todayStr > lastDayStr) {
       return { valid: false, message: 'This month is locked. Cannot add new entries.' };
     }
     
     return { valid: true, message: null };
   }, [selectedDate]);
 
-  // Handle location selection - now searches in ALL locations
+  // ═══════════════════════════════════════════════════════════════
+  // HANDLE PROCESS CHANGE - Reset location when process changes
+  // ═══════════════════════════════════════════════════════════════
+  const handleProcessChange = (projectId) => {
+    setFormData(prev => ({
+      ...prev,
+      selectedProcess: projectId,
+      subproject_id: '' // Reset location when process changes
+    }));
+    setSelectedLocationInfo(null);
+  };
+
+  // Handle location selection
   const handleLocationChange = (subprojectId) => {
-    const location = allAssignedLocations.find(l => l.subproject_id === subprojectId);
+    const location = locationsForSelectedProcess.find(l => l.subproject_id === subprojectId);
     setSelectedLocationInfo(location);
     
     setFormData(prev => ({
@@ -195,12 +238,17 @@ const VerismaAllocationPanel = ({
 
   // Submit new entry
   const handleSubmit = async () => {
+    if (!formData.selectedProcess) {
+      toast.error('Please select a Process');
+      return;
+    }
+    
     if (!formData.subproject_id) {
       toast.error('Please select a Location');
       return;
     }
     
-    if (!formData.request_id) {
+    if (!formData.request_id || formData.request_id.trim() === '') {
       toast.error('Please enter Request ID');
       return;
     }
@@ -233,7 +281,7 @@ const VerismaAllocationPanel = ({
         subproject_id: formData.subproject_id,
         allocation_date: selectedDate,
         facility: formData.facility,
-        request_id: formData.request_id,
+        request_id: formData.request_id.trim(),
         request_type: formData.request_type,
         requestor_type: formData.requestor_type,
         bronx_care_processing_time: formData.bronx_care_processing_time,
@@ -245,7 +293,7 @@ const VerismaAllocationPanel = ({
       
       toast.success('Entry submitted successfully!');
       
-      // Reset form but KEEP the selected location for quick additional entries
+      // Reset form but KEEP the selected process and location for quick additional entries
       setFormData(prev => ({
         ...prev,
         facility: '',
@@ -255,7 +303,7 @@ const VerismaAllocationPanel = ({
         bronx_care_processing_time: '',
         count: 1,
         remark: ''
-        // Keep subproject_id for quick additional entries on same location
+        // Keep selectedProcess and subproject_id for quick additional entries
       }));
       setRequestIdWarning(null);
       
@@ -336,9 +384,12 @@ const VerismaAllocationPanel = ({
     
     const allocDate = new Date(allocation.allocation_date);
     const lastDayOfMonth = new Date(allocDate.getFullYear(), allocDate.getMonth() + 1, 0);
-    lastDayOfMonth.setHours(23, 59, 59, 999);
     
-    return new Date() > lastDayOfMonth;
+    const today = new Date();
+    const todayStr = today.toLocaleDateString('en-CA');
+    const lastDayStr = lastDayOfMonth.toLocaleDateString('en-CA');
+    
+    return todayStr > lastDayStr;
   };
 
   // Stats
@@ -352,6 +403,13 @@ const VerismaAllocationPanel = ({
       locationsLogged: allAssignedLocations.length - pendingLocations.length
     };
   }, [pendingLocations, allocations, allAssignedLocations]);
+
+  // Get process name for selected process
+  const selectedProcessName = useMemo(() => {
+    if (!formData.selectedProcess) return '';
+    const proc = availableProcesses.find(p => p.project_id === formData.selectedProcess);
+    return proc?.project_name || '';
+  }, [formData.selectedProcess, availableProcesses]);
 
   return (
     <div className="space-y-4">
@@ -416,7 +474,7 @@ const VerismaAllocationPanel = ({
             </div>
           ) : (
             <>
-              {/* Form Row 1 */}
+              {/* Form Row 1 - REORDERED: Process before Location */}
               <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 mb-3">
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Allocation Date</label>
@@ -438,6 +496,26 @@ const VerismaAllocationPanel = ({
                   />
                 </div>
                 
+                {/* PROCESS DROPDOWN - NOW FIRST */}
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Process <span className="text-red-500">*</span>
+                  </label>
+                  <select 
+                    value={formData.selectedProcess} 
+                    onChange={(e) => handleProcessChange(e.target.value)} 
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500"
+                  >
+                    <option value="">-- Select Process --</option>
+                    {availableProcesses.map(proc => (
+                      <option key={proc.project_id} value={proc.project_id}>
+                        {proc.project_name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                
+                {/* LOCATION DROPDOWN - NOW SECOND, FILTERED BY PROCESS */}
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">
                     Location <span className="text-red-500">*</span>
@@ -445,28 +523,26 @@ const VerismaAllocationPanel = ({
                   <select 
                     value={formData.subproject_id} 
                     onChange={(e) => handleLocationChange(e.target.value)} 
-                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500"
+                    disabled={!formData.selectedProcess}
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
                   >
-                    <option value="">-- Select --</option>
-                    {availableLocations.map(loc => {
+                    <option value="">
+                      {formData.selectedProcess ? '-- Select Location --' : '-- Select Process First --'}
+                    </option>
+                    {locationsForSelectedProcess.map(loc => {
                       const entryCount = entriesPerLocation[loc.subproject_id?.toString()] || 0;
                       return (
                         <option key={loc.subproject_id} value={loc.subproject_id}>
-                          {loc.subproject_name} 
+                          {loc.subproject_name} {entryCount > 0 ? `(${entryCount} entries)` : ''}
                         </option>
                       );
                     })}
                   </select>
-                </div>
-                
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Process</label>
-                  <input 
-                    type="text" 
-                    value={selectedLocationInfo?.project_name || 'Select location'} 
-                    readOnly 
-                    className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded bg-gray-50" 
-                  />
+                  {formData.selectedProcess && locationsForSelectedProcess.length === 0 && (
+                    <p className="text-[10px] text-orange-600 mt-0.5">
+                      No locations for this process
+                    </p>
+                  )}
                 </div>
                 
                 <div>
@@ -549,16 +625,17 @@ const VerismaAllocationPanel = ({
                 <div className="col-span-2 lg:col-span-6 flex justify-end gap-2">
                   <button 
                     onClick={handleSubmit} 
-                    disabled={submitting || !formData.subproject_id || !formData.request_type || !formData.requestor_type || !formData.request_id || !dateValidation.valid} 
+                    disabled={submitting || !formData.selectedProcess || !formData.subproject_id || !formData.request_type || !formData.requestor_type || !formData.request_id?.trim() || !dateValidation.valid} 
                     className="px-6 py-1.5 bg-emerald-600 text-white text-xs font-medium rounded hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
                   >
                     {submitting ? 'Submitting...' : 'Submit Entry'}
                   </button>
                   
-                  {formData.subproject_id && (
+                  {(formData.selectedProcess || formData.subproject_id) && (
                     <button 
                       onClick={() => {
                         setFormData({
+                          selectedProcess: '',
                           subproject_id: '',
                           facility: '',
                           request_id: '',
@@ -599,8 +676,8 @@ const VerismaAllocationPanel = ({
               <thead className="bg-gray-100 text-gray-700">
                 <tr>
                   <th className="px-2 py-2 text-left font-semibold border-r">SR#</th>
-                  <th className="px-2 py-2 text-left font-semibold border-r">Location</th>
                   <th className="px-2 py-2 text-left font-semibold border-r">Process</th>
+                  <th className="px-2 py-2 text-left font-semibold border-r">Location</th>
                   <th className="px-2 py-2 text-left font-semibold border-r">Facility</th>
                   <th className="px-2 py-2 text-left font-semibold border-r">Request ID</th>
                   <th className="px-2 py-2 text-left font-semibold border-r">Request Type</th>
@@ -618,12 +695,12 @@ const VerismaAllocationPanel = ({
                     <React.Fragment key={alloc._id}>
                       <tr className={`${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'} ${isEditing ? 'bg-yellow-50' : ''}`}>
                         <td className="px-2 py-1.5 font-medium border-r">{alloc.sr_no}</td>
-                        <td className="px-2 py-1.5 border-r font-medium">{alloc.subproject_name}</td>
                         <td className="px-2 py-1.5 border-r">
                           <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-700">
                             {alloc.process || alloc.project_name}
                           </span>
                         </td>
+                        <td className="px-2 py-1.5 border-r font-medium">{alloc.subproject_name}</td>
                         <td className="px-1 py-1 border-r">
                           {isEditing ? (
                             <input 

@@ -1,6 +1,6 @@
 // src/pages/admin/AdminResourceCases.jsx
 // Admin view showing all resources with their logged cases summary and detailed view
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 
@@ -10,33 +10,41 @@ const AdminResourceCases = () => {
   const navigate = useNavigate();
   const [adminInfo, setAdminInfo] = useState(null);
   const [loading, setLoading] = useState(true);
-  
+
   // View mode: 'list' or 'detail'
   const [viewMode, setViewMode] = useState('list');
   const [selectedResource, setSelectedResource] = useState(null);
-  
+
   // Resources list with stats
   const [resources, setResources] = useState([]);
   const [loadingResources, setLoadingResources] = useState(false);
-  
+
+  // Allocation breakdown per resource (fetched from allocation APIs)
+  const [allocationMap, setAllocationMap] = useState(new Map());
+  const [loadingAllocations, setLoadingAllocations] = useState(false);
+
   // Detailed cases for selected resource
   const [cases, setCases] = useState([]);
   const [loadingCases, setLoadingCases] = useState(false);
   const [casePagination, setCasePagination] = useState({ page: 1, pages: 1, total: 0 });
-  
+
   // Hierarchy data for filters
   const [geographies, setGeographies] = useState([]);
   const [clients, setClients] = useState([]);
   const [projects, setProjects] = useState([]);
   const [subprojects, setSubprojects] = useState([]);
-  
+
   // List view filters
   const [listFilters, setListFilters] = useState({
     geography_id: '',
     client_id: '',
     search: ''
   });
-  
+
+  // Month/year for allocation breakdown
+  const [listMonth, setListMonth] = useState((new Date().getMonth() + 1).toString());
+  const [listYear, setListYear] = useState(new Date().getFullYear().toString());
+
   // Detail view filters
   const [detailFilters, setDetailFilters] = useState({
     client: '',
@@ -51,15 +59,15 @@ const AdminResourceCases = () => {
   useEffect(() => {
     const token = localStorage.getItem('token');
     const userType = localStorage.getItem('userType');
-    
+
     if (!token || userType !== 'admin') {
       navigate('/admin-login');
       return;
     }
-    
+
     const storedInfo = localStorage.getItem('adminInfo');
     if (storedInfo) setAdminInfo(JSON.parse(storedInfo));
-    
+
     setLoading(false);
     fetchGeographies();
     fetchClients();
@@ -70,7 +78,6 @@ const AdminResourceCases = () => {
     headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
   });
 
-  // Fetch hierarchy data
   const fetchGeographies = async () => {
     try {
       const response = await axios.get(`${API_URL}/geographies`, getAuthHeaders());
@@ -113,7 +120,7 @@ const AdminResourceCases = () => {
     }
   };
 
-  // Fetch resources with stats
+  // Fetch resources list
   const fetchResourcesWithStats = async () => {
     setLoadingResources(true);
     try {
@@ -121,24 +128,19 @@ const AdminResourceCases = () => {
       if (listFilters.geography_id) params.geography_id = listFilters.geography_id;
       if (listFilters.client_id) params.client_id = listFilters.client_id;
       if (listFilters.search) params.search = listFilters.search;
-      
+
       const response = await axios.get(`${API_URL}/admin/resources-with-stats`, {
         ...getAuthHeaders(),
         params
       });
-      
+
       setResources(response.data.resources || []);
     } catch (error) {
       console.error('Error fetching resources:', error);
-      // Fallback to basic resources endpoint
       try {
         const fallbackResponse = await axios.get(`${API_URL}/resources`, getAuthHeaders());
         const basicResources = fallbackResponse.data.resources || fallbackResponse.data || [];
-        // Add placeholder stats
-        setResources(basicResources.map(r => ({
-          ...r,
-          stats: { today: 0, till_yesterday: 0, total: 0 }
-        })));
+        setResources(basicResources.map(r => ({ ...r, stats: { today: 0, total: 0 } })));
       } catch (err) {
         setResources([]);
       }
@@ -147,18 +149,98 @@ const AdminResourceCases = () => {
     }
   };
 
+  // Fetch allocation breakdown from MRO + Verisma APIs, grouped by resource email
+  const fetchAllocationBreakdown = useCallback(async () => {
+    setLoadingAllocations(true);
+    try {
+      const token = localStorage.getItem('token');
+      const headers = { Authorization: `Bearer ${token}` };
+      const y = parseInt(listYear);
+      const m = parseInt(listMonth);
+      const startDate = `${y}-${String(m).padStart(2, '0')}-01`;
+      const endDate = `${y}-${String(m).padStart(2, '0')}-${new Date(y, m, 0).getDate()}`;
+      const todayStr = new Date().toISOString().split('T')[0];
+
+      const map = new Map();
+
+      const ensure = (email) => {
+        const key = email.toLowerCase();
+        if (!map.has(key)) {
+          map.set(key, { mroLogging: 0, mroProcessing: 0, verismaLogging: 0, verismaProcessing: 0, todayTotal: 0 });
+        }
+        return map.get(key);
+      };
+
+      // Verisma allocations
+      try {
+        const res = await fetch(
+          `${API_URL}/verisma-daily-allocations/admin/all?start_date=${startDate}&end_date=${endDate}&limit=10000`,
+          { headers }
+        );
+        if (res.ok) {
+          const data = await res.json();
+          (data.allocations || []).forEach(a => {
+            if (!a.resource_email) return;
+            const count = parseInt(a.count) || 1;
+            const entry = ensure(a.resource_email);
+            entry.verismaLogging += count;
+            if (a.allocation_date?.startsWith(todayStr)) entry.todayTotal += count;
+          });
+        }
+      } catch (e) { console.error('Verisma fetch error', e); }
+
+      // MRO Processing allocations
+      try {
+        const res = await fetch(
+          `${API_URL}/mro-daily-allocations/admin/all?month=${m}&year=${y}&limit=10000&process_type=Processing`,
+          { headers }
+        );
+        if (res.ok) {
+          const data = await res.json();
+          (data.allocations || []).forEach(a => {
+            if (!a.resource_email) return;
+            const count = parseInt(a.count) || 1;
+            const entry = ensure(a.resource_email);
+            entry.mroProcessing += count;
+            if (a.allocation_date?.startsWith(todayStr)) entry.todayTotal += count;
+          });
+        }
+      } catch (e) { console.error('MRO Processing fetch error', e); }
+
+      // MRO Logging allocations
+      try {
+        const res = await fetch(
+          `${API_URL}/mro-daily-allocations/admin/all?month=${m}&year=${y}&limit=10000&process_type=Logging`,
+          { headers }
+        );
+        if (res.ok) {
+          const data = await res.json();
+          (data.allocations || []).forEach(a => {
+            if (!a.resource_email) return;
+            const count = parseInt(a.count) || 1;
+            const entry = ensure(a.resource_email);
+            entry.mroLogging += count;
+            if (a.allocation_date?.startsWith(todayStr)) entry.todayTotal += count;
+          });
+        }
+      } catch (e) { console.error('MRO Logging fetch error', e); }
+
+      setAllocationMap(new Map(map));
+    } catch (e) {
+      console.error('Error fetching allocation breakdown:', e);
+    } finally {
+      setLoadingAllocations(false);
+    }
+  }, [listMonth, listYear]);
+
   // Fetch cases for selected resource
   const fetchResourceCases = async (page = 1) => {
     if (!selectedResource) return;
-    
+
     setLoadingCases(true);
     try {
-      const params = {
-        resource_email: selectedResource.email,
-        page,
-        limit: 50
-      };
-      
+      const params = { resource_email: selectedResource.email, page, limit: 50 };
+
       if (detailFilters.client) params.client = detailFilters.client;
       if (detailFilters.date) params.date = detailFilters.date;
       if (detailFilters.start_date) params.start_date = detailFilters.start_date;
@@ -166,12 +248,12 @@ const AdminResourceCases = () => {
       if (detailFilters.process_type) params.process_type = detailFilters.process_type;
       if (detailFilters.subproject_id) params.subproject_id = detailFilters.subproject_id;
       if (detailFilters.request_type) params.request_type = detailFilters.request_type;
-      
+
       const response = await axios.get(`${API_URL}/admin/resource-cases`, {
         ...getAuthHeaders(),
         params
       });
-      
+
       setCases(response.data.cases || []);
       setCasePagination({
         page: response.data.page || 1,
@@ -186,30 +268,23 @@ const AdminResourceCases = () => {
     }
   };
 
-  // Export cases to CSV
   const exportToCSV = async () => {
     if (!selectedResource) return;
-    
     try {
-      const params = {
-        resource_email: selectedResource.email,
-        export: 'csv'
-      };
-      
+      const params = { resource_email: selectedResource.email, export: 'csv' };
       if (detailFilters.client) params.client = detailFilters.client;
       if (detailFilters.date) params.date = detailFilters.date;
       if (detailFilters.start_date) params.start_date = detailFilters.start_date;
       if (detailFilters.end_date) params.end_date = detailFilters.end_date;
       if (detailFilters.process_type) params.process_type = detailFilters.process_type;
       if (detailFilters.subproject_id) params.subproject_id = detailFilters.subproject_id;
-      
+
       const response = await axios.get(`${API_URL}/admin/resource-cases/export`, {
         ...getAuthHeaders(),
         params,
         responseType: 'blob'
       });
-      
-      // Create download link
+
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = url;
@@ -224,47 +299,34 @@ const AdminResourceCases = () => {
     }
   };
 
-  // Handle resource selection
   const handleResourceClick = (resource) => {
     setSelectedResource(resource);
     setViewMode('detail');
-    setDetailFilters({
-      client: '',
-      date: '',
-      start_date: '',
-      end_date: '',
-      process_type: '',
-      subproject_id: '',
-      request_type: ''
-    });
+    setDetailFilters({ client: '', date: '', start_date: '', end_date: '', process_type: '', subproject_id: '', request_type: '' });
   };
 
-  // Handle back to list
   const handleBackToList = () => {
     setViewMode('list');
     setSelectedResource(null);
     setCases([]);
   };
 
-  // Fetch cases when detail filters change
   useEffect(() => {
-    if (viewMode === 'detail' && selectedResource) {
-      fetchResourceCases(1);
-    }
+    if (viewMode === 'detail' && selectedResource) fetchResourceCases(1);
   }, [viewMode, selectedResource, detailFilters]);
 
-  // Fetch resources when list filters change
   useEffect(() => {
-    if (viewMode === 'list') {
-      fetchResourcesWithStats();
-    }
+    if (viewMode === 'list') fetchResourcesWithStats();
   }, [listFilters]);
 
-  // Handle detail filter changes
+  // Fetch allocation breakdown whenever month/year changes
+  useEffect(() => {
+    fetchAllocationBreakdown();
+  }, [fetchAllocationBreakdown]);
+
   const handleDetailFilterChange = (field, value) => {
     setDetailFilters(prev => {
       const newFilters = { ...prev, [field]: value };
-      
       if (field === 'client') {
         newFilters.process_type = '';
         newFilters.subproject_id = '';
@@ -280,7 +342,6 @@ const AdminResourceCases = () => {
           if (project) fetchSubprojects(project._id);
         }
       }
-      
       return newFilters;
     });
   };
@@ -297,15 +358,20 @@ const AdminResourceCases = () => {
     return new Date(dateString).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' });
   };
 
-  // Filter resources by search
+  const fn = (n) => new Intl.NumberFormat('en-US').format(n || 0);
+
+  // Client-side filter by search
   const filteredResources = useMemo(() => {
     if (!listFilters.search) return resources;
     const search = listFilters.search.toLowerCase();
-    return resources.filter(r => 
-      r.name?.toLowerCase().includes(search) || 
+    return resources.filter(r =>
+      r.name?.toLowerCase().includes(search) ||
       r.email?.toLowerCase().includes(search)
     );
   }, [resources, listFilters.search]);
+
+  const monthLabel = new Date(parseInt(listYear), parseInt(listMonth) - 1)
+    .toLocaleString('default', { month: 'long', year: 'numeric' });
 
   if (loading) {
     return (
@@ -322,17 +388,22 @@ const AdminResourceCases = () => {
         <div className="max-w-full mx-auto px-4 py-3">
           <div className="flex justify-between items-center">
             <div className="flex items-center gap-3">
-              <button onClick={() => viewMode === 'detail' ? handleBackToList() : navigate('/admin-dashboard')} className="p-1.5 text-gray-500 hover:bg-gray-100 rounded">
+              <button
+                onClick={() => viewMode === 'detail' ? handleBackToList() : navigate('/admin-dashboard')}
+                className="p-1.5 text-gray-500 hover:bg-gray-100 rounded"
+              >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
                 </svg>
               </button>
               <div>
                 <h1 className="text-base font-semibold text-gray-800">
-                  {viewMode === 'list' ? 'Resource Cases Overview' : `Cases - ${selectedResource?.name}`}
+                  {viewMode === 'list' ? 'Resource Cases Overview' : `Cases — ${selectedResource?.name}`}
                 </h1>
                 <p className="text-xs text-gray-500">
-                  {viewMode === 'list' ? 'View all resources and their logged cases' : `Email: ${selectedResource?.email}`}
+                  {viewMode === 'list'
+                    ? `View all resources and their logged cases · ${monthLabel}`
+                    : `Email: ${selectedResource?.email}`}
                 </p>
               </div>
             </div>
@@ -353,17 +424,18 @@ const AdminResourceCases = () => {
       </header>
 
       <main className="max-w-full mx-auto px-4 py-4 space-y-4">
-        {/* ════════════════════════════════════════════════════════════════ */}
-        {/* LIST VIEW - All Resources with Stats */}
-        {/* ════════════════════════════════════════════════════════════════ */}
+
+        {/* ═══════════════════════════════════════════ */}
+        {/* LIST VIEW */}
+        {/* ═══════════════════════════════════════════ */}
         {viewMode === 'list' && (
           <>
-            {/* List Filters */}
+            {/* Filters */}
             <div className="bg-white rounded-lg shadow-sm border p-4">
               <h2 className="text-sm font-semibold text-gray-700 mb-3">🔍 Filters</h2>
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
                 {/* Search */}
-                <div>
+                <div className="md:col-span-2">
                   <label className="block text-xs font-medium text-gray-600 mb-1">Search Resource</label>
                   <input
                     type="text"
@@ -373,7 +445,7 @@ const AdminResourceCases = () => {
                     className="w-full px-3 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
                   />
                 </div>
-                
+
                 {/* Geography */}
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Geography</label>
@@ -388,7 +460,7 @@ const AdminResourceCases = () => {
                     ))}
                   </select>
                 </div>
-                
+
                 {/* Client */}
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Client</label>
@@ -403,14 +475,42 @@ const AdminResourceCases = () => {
                     ))}
                   </select>
                 </div>
-                
+
+                {/* Month / Year */}
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Month / Year</label>
+                  <div className="flex gap-1">
+                    <select
+                      value={listMonth}
+                      onChange={(e) => setListMonth(e.target.value)}
+                      className="flex-1 px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
+                    >
+                      {Array.from({ length: 12 }, (_, i) => (
+                        <option key={i + 1} value={i + 1}>
+                          {new Date(0, i).toLocaleString('default', { month: 'short' })}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={listYear}
+                      onChange={(e) => setListYear(e.target.value)}
+                      className="flex-1 px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
+                    >
+                      {[2027, 2026, 2025, 2024].map(y => (
+                        <option key={y} value={y}>{y}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
                 {/* Refresh */}
                 <div className="flex items-end">
                   <button
-                    onClick={fetchResourcesWithStats}
-                    className="w-full px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
+                    onClick={() => { fetchResourcesWithStats(); fetchAllocationBreakdown(); }}
+                    disabled={loadingResources || loadingAllocations}
+                    className="w-full px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-60"
                   >
-                    Refresh
+                    {(loadingResources || loadingAllocations) ? 'Loading...' : 'Refresh'}
                   </button>
                 </div>
               </div>
@@ -420,68 +520,160 @@ const AdminResourceCases = () => {
             <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
               <div className="px-4 py-2 bg-indigo-600 text-white flex justify-between items-center">
                 <h3 className="text-sm font-semibold">👥 All Resources</h3>
-                <span className="text-xs bg-indigo-500 px-2 py-0.5 rounded">{filteredResources.length} resources</span>
+                <div className="flex items-center gap-3 text-xs">
+                  <span className="bg-indigo-500 px-2 py-0.5 rounded">{filteredResources.length} resources</span>
+                  <span className="text-indigo-200">{monthLabel}</span>
+                  {loadingAllocations && <span className="text-indigo-200 animate-pulse">Loading cases...</span>}
+                </div>
               </div>
 
               {loadingResources ? (
-                <div className="p-8 text-center"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div></div>
+                <div className="p-8 text-center">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
+                </div>
               ) : filteredResources.length === 0 ? (
                 <div className="p-8 text-center text-gray-500 text-sm">No resources found</div>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="min-w-full text-xs">
-                    <thead className="bg-gray-100 text-gray-700">
+                  <table className="min-w-full text-xs border-collapse">
+                    <thead className="bg-gray-100 text-gray-700 sticky top-0">
+                      {/* Group row */}
                       <tr>
-                        <th className="px-3 py-2 text-left font-semibold border-r">#</th>
-                        <th className="px-3 py-2 text-left font-semibold border-r">Resource Name</th>
-                        <th className="px-3 py-2 text-left font-semibold border-r">Email</th>
-                        <th className="px-3 py-2 text-center font-semibold border-r bg-green-50">Today's Cases</th>
-                        <th className="px-3 py-2 text-center font-semibold border-r bg-yellow-50">Till Yesterday</th>
-                        <th className="px-3 py-2 text-center font-semibold border-r bg-blue-50">Total Cases</th>
-                        <th className="px-3 py-2 text-center font-semibold border-r">Assigned Locations</th>
-                        <th className="px-3 py-2 text-center font-semibold">Status</th>
+                        <th colSpan={3} className="px-2 py-1.5 text-left font-semibold border border-gray-300 bg-slate-700 text-white">RESOURCE</th>
+                        <th colSpan={1} className="px-2 py-1.5 text-center font-semibold border border-gray-300 bg-green-600 text-white">TODAY</th>
+                        <th colSpan={2} className="px-2 py-1.5 text-center font-semibold border border-gray-300 bg-green-700 text-white">MRO ({monthLabel})</th>
+                        <th colSpan={2} className="px-2 py-1.5 text-center font-semibold border border-gray-300 bg-blue-600 text-white">VERISMA ({monthLabel})</th>
+                        <th colSpan={1} className="px-2 py-1.5 text-center font-semibold border border-gray-300 bg-purple-600 text-white">TOTAL</th>
+                        <th colSpan={2} className="px-2 py-1.5 text-center font-semibold border border-gray-300 bg-gray-500 text-white">INFO</th>
+                      </tr>
+                      {/* Column headers */}
+                      <tr className="bg-gray-100">
+                        <th className="px-2 py-2 text-left font-semibold border border-gray-300 w-8">#</th>
+                        <th className="px-2 py-2 text-left font-semibold border border-gray-300 w-32">Name</th>
+                        <th className="px-2 py-2 text-left font-semibold border border-gray-300 w-40">Email</th>
+                        <th className="px-2 py-2 text-center font-semibold border border-gray-300 bg-green-50 w-16">Today</th>
+                        <th className="px-2 py-2 text-center font-semibold border border-gray-300 bg-green-50 w-16">Logging</th>
+                        <th className="px-2 py-2 text-center font-semibold border border-gray-300 bg-green-50 w-16">Processing</th>
+                        <th className="px-2 py-2 text-center font-semibold border border-gray-300 bg-blue-50 w-16">Logging</th>
+                        <th className="px-2 py-2 text-center font-semibold border border-gray-300 bg-blue-50 w-20">Processing</th>
+                        <th className="px-2 py-2 text-center font-semibold border border-gray-300 bg-purple-50 w-16">Cases</th>
+                        <th className="px-2 py-2 text-center font-semibold border border-gray-300 w-16">Locations</th>
+                        <th className="px-2 py-2 text-center font-semibold border border-gray-300 w-16">Status</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {filteredResources.map((resource, idx) => (
-                        <tr
-                          key={resource._id}
-                          onClick={() => handleResourceClick(resource)}
-                          className={`${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-indigo-50 cursor-pointer transition`}
-                        >
-                          <td className="px-3 py-2 font-medium border-r">{idx + 1}</td>
-                          <td className="px-3 py-2 border-r">
-                            <div className="font-medium text-indigo-600">{resource.name}</div>
-                          </td>
-                          <td className="px-3 py-2 border-r text-gray-600">{resource.email}</td>
-                          <td className="px-3 py-2 text-center border-r bg-green-50">
-                            <span className="px-2 py-0.5 rounded font-bold text-green-700 bg-green-100">
-                              {resource.stats?.today || 0}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 text-center border-r bg-yellow-50">
-                            <span className="px-2 py-0.5 rounded font-bold text-yellow-700 bg-yellow-100">
-                              {resource.stats?.till_yesterday || 0}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 text-center border-r bg-blue-50">
-                            <span className="px-2 py-0.5 rounded font-bold text-blue-700 bg-blue-100">
-                              {resource.stats?.total || 0}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 text-center border-r">
-                            {resource.assignments?.reduce((sum, a) => sum + (a.subprojects?.length || 0), 0) || 0}
-                          </td>
-                          <td className="px-3 py-2 text-center">
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${
-                              resource.is_active !== false ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-                            }`}>
-                              {resource.is_active !== false ? 'Active' : 'Inactive'}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
+                      {filteredResources.map((resource, idx) => {
+                        const a = allocationMap.get(resource.email?.toLowerCase()) || {
+                          mroLogging: 0, mroProcessing: 0, verismaLogging: 0, verismaProcessing: 0, todayTotal: 0
+                        };
+                        const total = a.mroLogging + a.mroProcessing + a.verismaLogging + a.verismaProcessing;
+
+                        return (
+                          <tr
+                            key={resource._id}
+                            onClick={() => handleResourceClick(resource)}
+                            className={`${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-indigo-50 cursor-pointer transition`}
+                          >
+                            <td className="px-2 py-1.5 font-medium border border-gray-200 text-gray-600">{idx + 1}</td>
+                            <td className="px-2 py-1.5 border border-gray-200 max-w-[8rem]">
+                              <div className="font-medium text-indigo-600 truncate" title={resource.name}>{resource.name}</div>
+                            </td>
+                            <td className="px-2 py-1.5 border border-gray-200 max-w-[10rem]">
+                              <div className="text-gray-500 truncate text-[10px]" title={resource.email}>{resource.email}</div>
+                            </td>
+
+                            {/* Today */}
+                            <td className="px-2 py-1.5 text-center border border-gray-200 bg-green-50">
+                              <span className={`px-1.5 py-0.5 rounded font-bold text-[11px] ${a.todayTotal > 0 ? 'text-green-700 bg-green-100' : 'text-gray-400'}`}>
+                                {fn(a.todayTotal)}
+                              </span>
+                            </td>
+
+                            {/* MRO Logging */}
+                            <td className="px-2 py-1.5 text-center border border-gray-200 bg-green-50">
+                              <span className={`font-semibold ${a.mroLogging > 0 ? 'text-green-700' : 'text-gray-300'}`}>
+                                {fn(a.mroLogging)}
+                              </span>
+                            </td>
+
+                            {/* MRO Processing */}
+                            <td className="px-2 py-1.5 text-center border border-gray-200 bg-green-50">
+                              <span className={`font-semibold ${a.mroProcessing > 0 ? 'text-emerald-700' : 'text-gray-300'}`}>
+                                {fn(a.mroProcessing)}
+                              </span>
+                            </td>
+
+                            {/* Verisma Logging */}
+                            <td className="px-2 py-1.5 text-center border border-gray-200 bg-blue-50">
+                              <span className={`font-semibold ${a.verismaLogging > 0 ? 'text-blue-700' : 'text-gray-300'}`}>
+                                {fn(a.verismaLogging)}
+                              </span>
+                            </td>
+
+                            {/* Verisma Processing (currently Verisma doesn't have processing but showing for completeness) */}
+                            <td className="px-2 py-1.5 text-center border border-gray-200 bg-blue-50">
+                              <span className={`font-semibold ${a.verismaProcessing > 0 ? 'text-indigo-700' : 'text-gray-300'}`}>
+                                {fn(a.verismaProcessing)}
+                              </span>
+                            </td>
+
+                            {/* Total */}
+                            <td className="px-2 py-1.5 text-center border border-gray-200 bg-purple-50">
+                              <span className={`px-1.5 py-0.5 rounded font-bold text-[11px] ${total > 0 ? 'text-purple-700 bg-purple-100' : 'text-gray-300'}`}>
+                                {fn(total)}
+                              </span>
+                            </td>
+
+                            {/* Assigned Locations */}
+                            <td className="px-2 py-1.5 text-center border border-gray-200 text-gray-600">
+                              {resource.assignments?.reduce((sum, a) => sum + (a.subprojects?.length || 0), 0) || 0}
+                            </td>
+
+                            {/* Status */}
+                            <td className="px-2 py-1.5 text-center border border-gray-200">
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                resource.is_active !== false ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                              }`}>
+                                {resource.is_active !== false ? 'Active' : 'Inactive'}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
+
+                    {/* Totals footer */}
+                    {filteredResources.length > 0 && !loadingAllocations && (
+                      <tfoot>
+                        <tr className="bg-slate-800 text-white font-bold text-xs">
+                          <td className="px-2 py-1.5 border border-slate-700"></td>
+                          <td className="px-2 py-1.5 border border-slate-700">TOTAL</td>
+                          <td className="px-2 py-1.5 border border-slate-700"></td>
+                          <td className="px-2 py-1.5 text-center border border-slate-700 text-green-300">
+                            {fn(filteredResources.reduce((s, r) => s + (allocationMap.get(r.email?.toLowerCase())?.todayTotal || 0), 0))}
+                          </td>
+                          <td className="px-2 py-1.5 text-center border border-slate-700 text-green-300">
+                            {fn(filteredResources.reduce((s, r) => s + (allocationMap.get(r.email?.toLowerCase())?.mroLogging || 0), 0))}
+                          </td>
+                          <td className="px-2 py-1.5 text-center border border-slate-700 text-emerald-300">
+                            {fn(filteredResources.reduce((s, r) => s + (allocationMap.get(r.email?.toLowerCase())?.mroProcessing || 0), 0))}
+                          </td>
+                          <td className="px-2 py-1.5 text-center border border-slate-700 text-blue-300">
+                            {fn(filteredResources.reduce((s, r) => s + (allocationMap.get(r.email?.toLowerCase())?.verismaLogging || 0), 0))}
+                          </td>
+                          <td className="px-2 py-1.5 text-center border border-slate-700 text-indigo-300">
+                            {fn(filteredResources.reduce((s, r) => s + (allocationMap.get(r.email?.toLowerCase())?.verismaProcessing || 0), 0))}
+                          </td>
+                          <td className="px-2 py-1.5 text-center border border-slate-700 text-purple-300">
+                            {fn(filteredResources.reduce((s, r) => {
+                              const a = allocationMap.get(r.email?.toLowerCase()) || {};
+                              return s + (a.mroLogging || 0) + (a.mroProcessing || 0) + (a.verismaLogging || 0) + (a.verismaProcessing || 0);
+                            }, 0))}
+                          </td>
+                          <td className="px-2 py-1.5 border border-slate-700" colSpan={2}></td>
+                        </tr>
+                      </tfoot>
+                    )}
                   </table>
                 </div>
               )}
@@ -489,9 +681,9 @@ const AdminResourceCases = () => {
           </>
         )}
 
-        {/* ════════════════════════════════════════════════════════════════ */}
-        {/* DETAIL VIEW - Selected Resource Cases */}
-        {/* ════════════════════════════════════════════════════════════════ */}
+        {/* ═══════════════════════════════════════════ */}
+        {/* DETAIL VIEW */}
+        {/* ═══════════════════════════════════════════ */}
         {viewMode === 'detail' && selectedResource && (
           <>
             {/* Resource Summary Card */}
@@ -506,19 +698,35 @@ const AdminResourceCases = () => {
                     <p className="text-sm text-gray-500">{selectedResource.email}</p>
                   </div>
                 </div>
-                <div className="flex gap-4">
-                  <div className="text-center px-4 py-2 bg-green-50 rounded-lg">
-                    <div className="text-2xl font-bold text-green-600">{selectedResource.stats?.today || 0}</div>
-                    <div className="text-xs text-green-700">Today</div>
-                  </div>
-                  <div className="text-center px-4 py-2 bg-yellow-50 rounded-lg">
-                    <div className="text-2xl font-bold text-yellow-600">{selectedResource.stats?.till_yesterday || 0}</div>
-                    <div className="text-xs text-yellow-700">Till Yesterday</div>
-                  </div>
-                  <div className="text-center px-4 py-2 bg-blue-50 rounded-lg">
-                    <div className="text-2xl font-bold text-blue-600">{selectedResource.stats?.total || 0}</div>
-                    <div className="text-xs text-blue-700">Total</div>
-                  </div>
+                <div className="flex gap-3">
+                  {(() => {
+                    const a = allocationMap.get(selectedResource.email?.toLowerCase()) || {};
+                    const total = (a.mroLogging || 0) + (a.mroProcessing || 0) + (a.verismaLogging || 0) + (a.verismaProcessing || 0);
+                    return (
+                      <>
+                        <div className="text-center px-3 py-2 bg-green-50 rounded-lg">
+                          <div className="text-xl font-bold text-green-600">{fn(a.todayTotal || 0)}</div>
+                          <div className="text-[10px] text-green-700">Today</div>
+                        </div>
+                        <div className="text-center px-3 py-2 bg-green-50 rounded-lg">
+                          <div className="text-xl font-bold text-green-700">{fn(a.mroLogging || 0)}</div>
+                          <div className="text-[10px] text-green-800">MRO Logging</div>
+                        </div>
+                        <div className="text-center px-3 py-2 bg-emerald-50 rounded-lg">
+                          <div className="text-xl font-bold text-emerald-700">{fn(a.mroProcessing || 0)}</div>
+                          <div className="text-[10px] text-emerald-800">MRO Processing</div>
+                        </div>
+                        <div className="text-center px-3 py-2 bg-blue-50 rounded-lg">
+                          <div className="text-xl font-bold text-blue-600">{fn(a.verismaLogging || 0)}</div>
+                          <div className="text-[10px] text-blue-700">Verisma Log</div>
+                        </div>
+                        <div className="text-center px-3 py-2 bg-purple-50 rounded-lg">
+                          <div className="text-xl font-bold text-purple-600">{fn(total)}</div>
+                          <div className="text-[10px] text-purple-700">Total ({monthLabel})</div>
+                        </div>
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
             </div>
@@ -526,10 +734,7 @@ const AdminResourceCases = () => {
             {/* Detail Filters */}
             <div className="bg-white rounded-lg shadow-sm border p-4">
               <h2 className="text-sm font-semibold text-gray-700 mb-3">🔍 Filter Cases</h2>
-              
-              {/* Row 1 */}
-              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-3">
-                {/* Client */}
+              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Client</label>
                   <select
@@ -543,73 +748,44 @@ const AdminResourceCases = () => {
                     <option value="Datavant">Datavant</option>
                   </select>
                 </div>
-                
-                {/* Specific Date */}
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Specific Date</label>
-                  <input
-                    type="date"
-                    value={detailFilters.date}
+                  <input type="date" value={detailFilters.date}
                     onChange={(e) => handleDetailFilterChange('date', e.target.value)}
-                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
-                  />
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500" />
                 </div>
-                
-                {/* Start Date */}
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">From Date</label>
-                  <input
-                    type="date"
-                    value={detailFilters.start_date}
+                  <input type="date" value={detailFilters.start_date}
                     onChange={(e) => handleDetailFilterChange('start_date', e.target.value)}
-                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
-                  />
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500" />
                 </div>
-                
-                {/* End Date */}
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">To Date</label>
-                  <input
-                    type="date"
-                    value={detailFilters.end_date}
+                  <input type="date" value={detailFilters.end_date}
                     onChange={(e) => handleDetailFilterChange('end_date', e.target.value)}
-                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
-                  />
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500" />
                 </div>
-                
-                {/* Process Type */}
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Process Type</label>
-                  <select
-                    value={detailFilters.process_type}
+                  <select value={detailFilters.process_type}
                     onChange={(e) => handleDetailFilterChange('process_type', e.target.value)}
                     disabled={!detailFilters.client}
-                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
-                  >
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100">
                     <option value="">All</option>
-                    {projects.map(p => (
-                      <option key={p._id} value={p.name}>{p.name}</option>
-                    ))}
+                    {projects.map(p => <option key={p._id} value={p.name}>{p.name}</option>)}
                   </select>
                 </div>
-                
-                {/* Location */}
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Location</label>
-                  <select
-                    value={detailFilters.subproject_id}
+                  <select value={detailFilters.subproject_id}
                     onChange={(e) => handleDetailFilterChange('subproject_id', e.target.value)}
                     disabled={!detailFilters.process_type}
-                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
-                  >
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100">
                     <option value="">All</option>
-                    {subprojects.map(sp => (
-                      <option key={sp._id} value={sp._id}>{sp.name}</option>
-                    ))}
+                    {subprojects.map(sp => <option key={sp._id} value={sp._id}>{sp.name}</option>)}
                   </select>
                 </div>
-                
-                {/* Clear Filters */}
                 <div className="flex items-end">
                   <button
                     onClick={() => setDetailFilters({ client: '', date: '', start_date: '', end_date: '', process_type: '', subproject_id: '', request_type: '' })}
@@ -627,12 +803,7 @@ const AdminResourceCases = () => {
                 <h3 className="text-sm font-semibold">📋 Logged Cases</h3>
                 <div className="flex items-center gap-3">
                   <span className="text-xs bg-gray-700 px-2 py-0.5 rounded">{casePagination.total} total cases</span>
-                  <button onClick={exportToCSV} className="text-xs bg-green-600 px-2 py-0.5 rounded hover:bg-green-700 flex items-center gap-1">
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                    </svg>
-                    Export
-                  </button>
+                  <button onClick={exportToCSV} className="text-xs bg-green-600 px-2 py-0.5 rounded hover:bg-green-700">Export</button>
                 </div>
               </div>
 
@@ -661,13 +832,11 @@ const AdminResourceCases = () => {
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {cases.map((caseItem, idx) => {
-                        // Color coding
                         let rowClass = idx % 2 === 0 ? 'bg-white' : 'bg-gray-50';
                         if (caseItem.is_deleted) rowClass = 'bg-red-50 border-l-4 border-red-500';
                         else if (caseItem.has_pending_delete_request) rowClass = 'bg-orange-50 border-l-4 border-orange-500';
                         else if (caseItem.is_late_log) rowClass = 'bg-yellow-50 border-l-4 border-yellow-500';
                         else if (caseItem.edit_count > 0) rowClass = 'bg-blue-50 border-l-4 border-blue-500';
-                        
                         return (
                           <tr key={caseItem._id} className={`${rowClass} hover:bg-opacity-80`}>
                             <td className="px-2 py-1.5 font-medium border-r">{caseItem.sr_no}</td>
@@ -686,23 +855,21 @@ const AdminResourceCases = () => {
                             <td className="px-2 py-1.5 border-r">{caseItem.request_type || '-'}</td>
                             <td className="px-2 py-1.5 text-center border-r font-medium">{caseItem.count || 1}</td>
                             <td className="px-2 py-1.5 text-center border-r">
-                              {caseItem.is_late_log ? (
-                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-200 text-yellow-800">+{caseItem.days_late}d</span>
-                              ) : '-'}
+                              {caseItem.is_late_log
+                                ? <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-200 text-yellow-800">+{caseItem.days_late}d</span>
+                                : '-'}
                             </td>
                             <td className="px-2 py-1.5 text-center border-r">
-                              {caseItem.edit_count > 0 ? (
-                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-200 text-blue-800">{caseItem.edit_count}x</span>
-                              ) : '-'}
+                              {caseItem.edit_count > 0
+                                ? <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-200 text-blue-800">{caseItem.edit_count}x</span>
+                                : '-'}
                             </td>
                             <td className="px-2 py-1.5 text-center">
-                              {caseItem.is_deleted ? (
-                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-200 text-red-800">Deleted</span>
-                              ) : caseItem.has_pending_delete_request ? (
-                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-200 text-orange-800">Del Req</span>
-                              ) : (
-                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-700">Active</span>
-                              )}
+                              {caseItem.is_deleted
+                                ? <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-200 text-red-800">Deleted</span>
+                                : caseItem.has_pending_delete_request
+                                ? <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-200 text-orange-800">Del Req</span>
+                                : <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-700">Active</span>}
                             </td>
                           </tr>
                         );
@@ -712,7 +879,6 @@ const AdminResourceCases = () => {
                 </div>
               )}
 
-              {/* Pagination */}
               {casePagination.pages > 1 && (
                 <div className="px-4 py-3 border-t flex items-center justify-between">
                   <span className="text-xs text-gray-600">Page {casePagination.page} of {casePagination.pages}</span>

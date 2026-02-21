@@ -3,10 +3,12 @@
 // Clean, compact design with minimal colors - aesthetic table styling
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 
-const apiBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000/api';
+const apiBaseUrl = import.meta.env.VITE_BACKEND_URL  ;
 
 const CostingDashboard = () => {
+  const navigate = useNavigate();
   const [activeClient, setActiveClient] = useState('verisma');
   const [projects, setProjects] = useState([]);
   const [clientId, setClientId] = useState(null);
@@ -293,7 +295,25 @@ const CostingDashboard = () => {
         </div>
       </div>
 
+      {/* Datavant redirect */}
+      {activeClient === 'datavant' && (
+        <div className="p-8 flex flex-col items-center justify-center gap-4 text-center">
+          <div className="text-5xl">📊</div>
+          <h2 className="text-lg font-semibold text-slate-700">Datavant has its own dashboard</h2>
+          <p className="text-sm text-slate-500 max-w-sm">
+            Datavant allocations are tracked separately by process type. View the dedicated Datavant Dashboard for a full breakdown.
+          </p>
+          <button
+            onClick={() => navigate('/datavant-dashboard')}
+            className="px-5 py-2 bg-purple-600 text-white text-sm font-medium rounded-lg hover:bg-purple-700"
+          >
+            Go to Datavant Dashboard →
+          </button>
+        </div>
+      )}
+
       {/* Table */}
+      {activeClient !== 'datavant' && (
       <div className="p-3">
         <div ref={scrollRef} className="bg-white rounded-lg shadow-sm overflow-auto" style={{ maxHeight: 'calc(100vh - 130px)' }}>
           <table className="w-full text-xs">
@@ -397,6 +417,7 @@ const CostingDashboard = () => {
           </table>
         </div>
       </div>
+      )}
     </div>
   );
 };

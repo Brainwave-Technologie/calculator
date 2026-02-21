@@ -1,6 +1,8 @@
 // routes/verisma-daily-allocations.routes.js
-// FIXED: Supports direct subproject_id submission like MRO (no assignment required)
-// PST timezone
+// FIXED: 
+// 1. Fixed future date validation using proper PST comparison
+// 2. REMOVED duplicate entry check - allows multiple entries per location per day
+// 3. Request ID can only have ONE "New Request" entry (same logic)
 const express = require('express');
 const router = express.Router();
 
@@ -21,40 +23,62 @@ const { authenticateResource, authenticateUser } = require('../../middleware/aut
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Get current date/time in PST timezone
+ * Get current date in PST as a normalized date string (YYYY-MM-DD)
  */
-const getPSTDate = () => {
+const getPSTDateString = () => {
+  const now = new Date();
+  const pstString = now.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  return pstString; // Returns "2026-02-20" format
+};
+
+/**
+ * Get current datetime in PST
+ */
+const getPSTNow = () => {
   const now = new Date();
   const pstString = now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
   return new Date(pstString);
 };
 
 /**
- * Convert a date to PST for comparison
+ * Normalize a date to YYYY-MM-DD string for comparison
  */
-const toPST = (date) => {
+const normalizeDateString = (date) => {
+  if (!date) return null;
   const d = new Date(date);
-  const pstString = d.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
-  return new Date(pstString);
+  return d.toISOString().split('T')[0]; // Returns "2026-02-20" format
 };
 
 /**
- * Check if date is locked (PST timezone)
+ * Check if date is in the future (PST comparison)
+ */
+const isFutureDate = (dateStr) => {
+  const todayPST = getPSTDateString(); // "2026-02-20"
+  const targetDate = normalizeDateString(dateStr); // "2026-02-20"
+  return targetDate > todayPST;
+};
+
+/**
+ * Check if date is locked (past month-end in PST)
  */
 const isDateLocked = (date) => {
-  const pstNow = getPSTDate();
+  const pstNow = getPSTNow();
   const allocDate = new Date(date);
-  const lastDayOfMonth = new Date(allocDate.getFullYear(), allocDate.getMonth() + 1, 0).getDate();
-  const lockDate = new Date(allocDate.getFullYear(), allocDate.getMonth(), lastDayOfMonth, 23, 59, 59);
-  const lockDatePST = toPST(lockDate);
+  
+  // Get last day of the allocation month
+  const lastDayOfMonth = new Date(allocDate.getFullYear(), allocDate.getMonth() + 1, 0);
+  lastDayOfMonth.setHours(23, 59, 59, 999);
+  
+  // Convert to PST for comparison
+  const lockDatePST = new Date(lastDayOfMonth.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+  
   return pstNow > lockDatePST;
 };
 
 const getNextSrNo = async (resourceEmail, date) => {
-  const startOfDay = new Date(date);
-  startOfDay.setHours(0, 0, 0, 0);
-  const endOfDay = new Date(date);
-  endOfDay.setHours(23, 59, 59, 999);
+  const dateStr = normalizeDateString(date);
+  const startOfDay = new Date(dateStr + 'T00:00:00.000Z');
+  const endOfDay = new Date(dateStr + 'T23:59:59.999Z');
   
   const lastEntry = await VerismaDailyAllocation.findOne({
     resource_email: resourceEmail.toLowerCase().trim(),
@@ -103,7 +127,7 @@ const checkRequestIdExists = async (requestId, excludeId = null) => {
 
 /**
  * POST: Create new allocation entry
- * NOW WORKS LIKE MRO - accepts subproject_id directly without assignment
+ * ALLOWS multiple entries per location per day (different Request IDs)
  */
 router.post('/', authenticateResource, async (req, res) => {
   try {
@@ -126,6 +150,10 @@ router.post('/', authenticateResource, async (req, res) => {
       return res.status(400).json({ message: 'Location (subproject_id) is required' });
     }
     
+    if (!request_id || request_id.trim() === '') {
+      return res.status(400).json({ message: 'Request ID is required' });
+    }
+    
     if (!request_type) {
       return res.status(400).json({ message: 'Request type is required' });
     }
@@ -136,20 +164,18 @@ router.post('/', authenticateResource, async (req, res) => {
     
     const resource = req.resource;
     
-    // Parse allocation date
-    const targetDate = allocation_date ? new Date(allocation_date) : getPSTDate();
-    targetDate.setHours(0, 0, 0, 0);
+    // Normalize allocation date to YYYY-MM-DD
+    const targetDateStr = allocation_date ? normalizeDateString(allocation_date) : getPSTDateString();
+    const targetDate = new Date(targetDateStr + 'T00:00:00.000Z');
     
-    // Check if date is locked
-    if (isDateLocked(targetDate)) {
-      return res.status(403).json({ message: 'Cannot add entries for locked month.' });
+    // Check if date is in the future (using string comparison to avoid timezone issues)
+    if (isFutureDate(targetDateStr)) {
+      return res.status(400).json({ message: 'Cannot add entries for future dates.' });
     }
     
-    // Check if date is in the future
-    const today = getPSTDate();
-    today.setHours(0, 0, 0, 0);
-    if (targetDate > today) {
-      return res.status(400).json({ message: 'Cannot add entries for future dates.' });
+    // Check if date is locked (past month-end)
+    if (isDateLocked(targetDate)) {
+      return res.status(403).json({ message: 'Cannot add entries for locked month.' });
     }
     
     // Get subproject details
@@ -173,11 +199,10 @@ router.post('/', authenticateResource, async (req, res) => {
         if (sp.subproject_id?.toString() === subproject_id.toString()) {
           // Check assigned_date
           if (sp.assigned_date) {
-            const assignedDate = new Date(sp.assigned_date);
-            assignedDate.setHours(0, 0, 0, 0);
-            if (assignedDate > targetDate) {
+            const assignedDateStr = normalizeDateString(sp.assigned_date);
+            if (assignedDateStr > targetDateStr) {
               return res.status(403).json({ 
-                message: `This location was assigned on ${assignedDate.toISOString().split('T')[0]}. Cannot log for dates before assignment.` 
+                message: `This location was assigned on ${assignedDateStr}. Cannot log for dates before assignment.` 
               });
             }
           }
@@ -200,25 +225,13 @@ router.post('/', authenticateResource, async (req, res) => {
       return res.status(403).json({ message: 'You do not have access to this location' });
     }
     
-    // Check if already logged for this date + location
-    const dateStart = new Date(targetDate);
-    const dateEnd = new Date(targetDate);
-    dateEnd.setHours(23, 59, 59, 999);
+    // ═══════════════════════════════════════════════════════════════
+    // REMOVED: The duplicate entry check that was blocking multiple entries
+    // per location per day. Now resources CAN log multiple entries for the
+    // same location on the same day (with different Request IDs).
+    // ═══════════════════════════════════════════════════════════════
     
-    const existingEntry = await VerismaDailyAllocation.findOne({
-      resource_email: resource.email.toLowerCase(),
-      subproject_id: subproject_id,
-      allocation_date: { $gte: dateStart, $lte: dateEnd },
-      is_deleted: { $ne: true }
-    });
-    
-    if (existingEntry) {
-      return res.status(400).json({ 
-        message: 'You have already logged an entry for this location on this date.' 
-      });
-    }
-    
-    // Request ID validation
+    // Request ID "New Request" validation (only ONE "New Request" per Request ID)
     if (request_type === 'New Request' && request_id && request_id.trim() !== '') {
       const requestCheck = await checkRequestIdExists(request_id);
       if (requestCheck.exists) {
@@ -235,8 +248,9 @@ router.post('/', authenticateResource, async (req, res) => {
     const srNo = await getNextSrNo(resource.email, targetDate);
     
     // Calculate late log
-    const isLateLog = today > targetDate;
-    const daysLate = isLateLog ? Math.floor((today - targetDate) / (1000 * 60 * 60 * 24)) : 0;
+    const todayStr = getPSTDateString();
+    const isLateLog = targetDateStr < todayStr;
+    const daysLate = isLateLog ? Math.floor((new Date(todayStr) - new Date(targetDateStr)) / (1000 * 60 * 60 * 24)) : 0;
     
     // Create allocation
     const allocation = new VerismaDailyAllocation({
@@ -258,7 +272,7 @@ router.post('/', authenticateResource, async (req, res) => {
       process: project?.name || '',
       facility: facility || '',
       bronx_care_processing_time: bronx_care_processing_time || '',
-      request_id: request_id || '',
+      request_id: request_id.trim(),
       request_type,
       requestor_type: requestor_type || '',
       count: entryCount,
@@ -292,7 +306,8 @@ router.post('/', authenticateResource, async (req, res) => {
           sr_no: srNo, 
           count: entryCount,
           is_late_log: isLateLog,
-          days_late: daysLate
+          days_late: daysLate,
+          request_id: request_id.trim()
         }
       });
     } catch (logErr) {
@@ -317,12 +332,10 @@ router.post('/', authenticateResource, async (req, res) => {
 router.get('/my-allocations', authenticateResource, async (req, res) => {
   try {
     const { date } = req.query;
-    const targetDate = date ? new Date(date) : getPSTDate();
+    const targetDateStr = date ? normalizeDateString(date) : getPSTDateString();
     
-    const startOfDay = new Date(targetDate);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(targetDate);
-    endOfDay.setHours(23, 59, 59, 999);
+    const startOfDay = new Date(targetDateStr + 'T00:00:00.000Z');
+    const endOfDay = new Date(targetDateStr + 'T23:59:59.999Z');
     
     const allocations = await VerismaDailyAllocation.find({
       resource_email: req.resource.email.toLowerCase(),
@@ -332,7 +345,7 @@ router.get('/my-allocations', authenticateResource, async (req, res) => {
     
     res.json({ 
       success: true, 
-      date: targetDate.toISOString().split('T')[0], 
+      date: targetDateStr, 
       count: allocations.length, 
       allocations 
     });

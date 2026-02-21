@@ -4,7 +4,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-const apiBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000/api';
+const apiBaseUrl = import.meta.env.VITE_BACKEND_URL 
 
 const PayrollDashboard = () => {
   const [activeClient, setActiveClient] = useState('verisma');
@@ -224,13 +224,13 @@ const PayrollDashboard = () => {
         ) : (
           <div ref={scrollRef} className="bg-white rounded-lg shadow-sm overflow-auto" style={{ maxHeight: 'calc(100vh - 180px)' }}>
             <table className="w-full text-xs border-collapse">
-              <thead className="sticky top-0 z-10">
+              <thead>
                 <tr className="bg-slate-50">
-                  <th className="sticky left-0 z-20 bg-slate-50 border-b border-r border-slate-200 px-3 py-2.5 text-left font-semibold text-slate-600 min-w-[90px]">Date</th>
-                  <th className="sticky left-[90px] z-20 bg-slate-50 border-b border-r border-slate-200 px-2 py-2.5 text-center font-semibold text-slate-600 min-w-[50px]">Day</th>
-                  <th className="sticky left-[140px] z-20 bg-slate-100 border-b border-r border-slate-200 px-2 py-2.5 text-center font-semibold text-slate-700 min-w-[70px]">Overall</th>
+                  <th className="sticky top-0 left-0 z-30 bg-slate-50 border-b border-r border-slate-200 px-3 py-2.5 text-left font-semibold text-slate-600 min-w-[90px]">Date</th>
+                  <th className="sticky top-0 left-[90px] z-30 bg-slate-50 border-b border-r border-slate-200 px-2 py-2.5 text-center font-semibold text-slate-600 min-w-[50px]">Day</th>
+                  <th className="sticky top-0 left-[140px] z-30 bg-slate-100 border-b border-r border-slate-200 px-2 py-2.5 text-center font-semibold text-slate-700 min-w-[70px]">Overall</th>
                   {mergedResources.map((r, i) => (
-                    <th key={i} className="bg-slate-50 border-b border-slate-200 px-2 py-2.5 text-center font-medium text-slate-600 min-w-[100px] whitespace-nowrap" title={r.resource_email || r.resource_name}>
+                    <th key={i} className="sticky top-0 z-20 bg-slate-50 border-b border-slate-200 px-2 py-2.5 text-center font-medium text-slate-600 min-w-[100px] whitespace-nowrap" title={r.resource_email || r.resource_name}>
                       {r.resource_name || 'Unknown'}
                     </th>
                   ))}

@@ -33,6 +33,7 @@ const ProjectPage = () => {
   const [loading, setLoading] = useState(false);
   const [showCsvFormat, setShowCsvFormat] = useState(false);
   const [showMroCsvFormat, setShowMroCsvFormat] = useState(false);
+  const [showDatavantCsvFormat, setShowDatavantCsvFormat] = useState(false);
 
   // Pagination for geographies
   const [currentPage, setCurrentPage] = useState(1);
@@ -518,6 +519,49 @@ const handleDeleteGeography = (geography, e) => {
     }
   };
 
+  const handleDatavantCSVUpload = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    if (file.type !== "text/csv" && !file.name.endsWith('.csv')) {
+      toast.error("Invalid CSV file");
+      return;
+    }
+    const formData = new FormData();
+    formData.append("file", file);
+    toast.loading("Uploading Datavant data...");
+    try {
+      const res = await axios.post(`${apiUrl}/datavant-upload/datavant-bulk-upload-replace`, formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+        responseType: "blob",
+      });
+      const isJSON = res.headers["content-type"]?.includes("application/json");
+      if (isJSON) {
+        const text = await res.data.text();
+        const json = JSON.parse(text);
+        toast.dismiss();
+        toast.success(json.message || "Datavant data uploaded successfully!");
+        refreshAll();
+        return;
+      }
+    } catch (err) {
+      if (err?.response?.status === 400 && err.response.headers["content-type"]?.includes("text/csv")) {
+        const blob = err.response.data;
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "datavant-upload-errors.csv";
+        a.click();
+        toast.dismiss();
+        toast.error("Errors found. Check downloaded CSV.");
+        return;
+      }
+      toast.dismiss();
+      toast.error("Datavant upload failed.");
+    } finally {
+      event.target.value = "";
+    }
+  };
+
   const refreshAll = () => {
     setExpandedGeographies({});
     setExpandedClients({});
@@ -532,10 +576,11 @@ const handleDeleteGeography = (geography, e) => {
   };
 
   // ==================== RENDER LOCATION TABLE ====================
-  const renderLocationTable = (subprojects, isMRO, projectName, projectId, subprojectCache) => {
-    const isProcessing = projectName?.toLowerCase() === 'processing';
-    const isLogging = projectName?.toLowerCase() === 'logging';
-    const isPayer = projectName?.toLowerCase().includes('payer');
+  const renderLocationTable = (subprojects, isMRO, projectName, projectId, subprojectCache, clientName) => {
+    const isDatavant = clientName?.toLowerCase() === 'datavant';
+    const isProcessing = !isDatavant && projectName?.toLowerCase() === 'processing';
+    const isLogging = !isDatavant && projectName?.toLowerCase() === 'logging';
+    const isPayer = !isDatavant && projectName?.toLowerCase().includes('payer');
 
     const currentPageNum = subprojectCache?.page || 1;
     const totalPages = subprojectCache?.totalPages || 1;
@@ -576,20 +621,24 @@ const handleDeleteGeography = (geography, e) => {
         <table className="min-w-full text-xs bg-white">
           <thead className="bg-gray-200">
             <tr>
-              <th className="px-4 py-2 text-left font-semibold">Location</th>
-              
-              {/* MRO Processing - Show Requestor Types */}
-              {isMRO && isProcessing ? (
+              <th className="px-4 py-2 text-left font-semibold">{isDatavant ? 'Process Type' : 'Location'}</th>
+
+              {/* Datavant - Show Flat Rate and Billing Rate */}
+              {isDatavant ? (
+                <>
+                  <th className="px-4 py-2 text-right font-semibold text-purple-600">Flat Rate (Resource)</th>
+                  <th className="px-4 py-2 text-right font-semibold text-blue-600">Billing Rate (Client)</th>
+                </>
+              ) : /* MRO Processing - Show Requestor Types */
+              isMRO && isProcessing ? (
                 <>
                   <th className="px-4 py-2 text-right font-semibold text-teal-600">NRS-NO Records</th>
                   <th className="px-4 py-2 text-right font-semibold text-blue-600">Manual</th>
-                  <th className="px-4 py-2 text-right font-semibold text-gray-500">Other Processing</th>
-                  <th className="px-4 py-2 text-right font-semibold text-gray-500">Processed</th>
-                  <th className="px-4 py-2 text-right font-semibold text-gray-500">File Drop</th>
+                  <th className="px-4 py-2 text-right font-semibold text-purple-600">Payout Rate</th>
                 </>
               ) : isMRO && (isLogging || isPayer) ? (
-                /* MRO Logging/Payer - Show Rate */
-                <th className="px-4 py-2 text-right font-semibold text-emerald-600">Rate</th>
+                /* MRO Logging/Payer - Show Billing Rate */
+                <th className="px-4 py-2 text-right font-semibold text-emerald-600">Billing Rate</th>
               ) : (
                 /* Verisma - Show Request Types */
                 <>
@@ -606,7 +655,7 @@ const handleDeleteGeography = (geography, e) => {
           <tbody>
             {isLoadingPage ? (
               <tr>
-                <td colSpan={isMRO && isProcessing ? 7 : isMRO && (isLogging || isPayer) ? 3 : 6} className="px-4 py-8 text-center">
+                <td colSpan={isDatavant ? 4 : isMRO && isProcessing ? 5 : isMRO && (isLogging || isPayer) ? 3 : 6} className="px-4 py-8 text-center">
                   <div className="flex justify-center items-center gap-2">
                     <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
                     <span className="text-gray-500">Loading...</span>
@@ -640,8 +689,20 @@ const handleDeleteGeography = (geography, e) => {
                     )} */}
                   </td>
 
-                  {/* MRO Processing columns */}
-                  {isMRO && isProcessing ? (
+                  {/* Datavant columns */}
+                  {isDatavant ? (
+                    <>
+                      <td className="px-4 py-2 text-right text-purple-700 font-semibold">
+                        {flatRate > 0 ? `$${flatRate.toFixed(2)}` : "-"}
+                      </td>
+                      <td className="px-4 py-2 text-right text-blue-700 font-semibold">
+                        {(sp.billing_rate || getRequestTypeRate(sp.request_types, 'Default') || 0) > 0
+                          ? `$${(sp.billing_rate || getRequestTypeRate(sp.request_types, 'Default') || 0).toFixed(2)}`
+                          : "-"}
+                      </td>
+                    </>
+                  ) : /* MRO Processing columns */
+                  isMRO && isProcessing ? (
                     <>
                       <td className="px-4 py-2 text-right text-teal-700 font-semibold">
                         {nrsRate > 0 ? `$${nrsRate.toFixed(2)}` : "-"}
@@ -649,14 +710,8 @@ const handleDeleteGeography = (geography, e) => {
                       <td className="px-4 py-2 text-right text-blue-700 font-semibold">
                         {manualRate > 0 ? `$${manualRate.toFixed(2)}` : "-"}
                       </td>
-                      <td className="px-4 py-2 text-right text-gray-500">
-                        {otherRate > 0 ? `$${otherRate.toFixed(2)}` : "-"}
-                      </td>
-                      <td className="px-4 py-2 text-right text-gray-500">
-                        {processedRate > 0 ? `$${processedRate.toFixed(2)}` : "-"}
-                      </td>
-                      <td className="px-4 py-2 text-right text-gray-500">
-                        {fileDropRate > 0 ? `$${fileDropRate.toFixed(2)}` : "-"}
+                      <td className="px-4 py-2 text-right text-purple-700 font-semibold">
+                        {flatRate > 0 ? `$${flatRate.toFixed(2)}` : "-"}
                       </td>
                     </>
                   ) : isMRO && (isLogging || isPayer) ? (
@@ -855,11 +910,27 @@ const handleDeleteGeography = (geography, e) => {
             </button>
           </div>
 
+          {/* Datavant Upload */}
+          <div className="flex items-center gap-2">
+            <label className="cursor-pointer bg-purple-600 text-white inline-flex items-center gap-2 px-4 py-2 rounded-xl hover:bg-purple-700 transition">
+              <FaUpload size={16} />
+              Datavant CSV
+              <input type="file" accept=".csv" onChange={handleDatavantCSVUpload} className="hidden" />
+            </label>
+            <button
+              onClick={() => setShowDatavantCsvFormat(!showDatavantCsvFormat)}
+              className="text-purple-600 hover:text-purple-800 transition"
+              title="Datavant CSV Format"
+            >
+              <FaInfoCircle size={18} />
+            </button>
+          </div>
+
           {/* Download Templates */}
           <div className="flex items-center gap-2 ml-4 border-l pl-4">
             <button
               onClick={() => {
-                const csvContent = "geography,client,process type,location,request type,rate,flat rate\nUS,Verisma,Data Processing,Location A,New Request,3.00,0\nUS,Verisma,Data Processing,Location A,Key,2.50,0\nUS,Verisma,Data Processing,Location A,Duplicate,2.00,0\n";
+                const csvContent = "geography,client,process type,location,request type,payout rate\nUS,Verisma,Data Processing,Location A,New Request,3.00\nUS,Verisma,Data Processing,Location A,Key,2.50\nUS,Verisma,Data Processing,Location A,Duplicate,2.00\n";
                 const blob = new Blob([csvContent], { type: "text/csv" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
@@ -875,7 +946,7 @@ const handleDeleteGeography = (geography, e) => {
 
             <button
               onClick={() => {
-                const csvContent = "geography,location,process_type,nrs_rate,other_processing_rate,processed_rate,file_drop_rate,manual_rate,flatrate\nUS,Fairview Processing,Processing,2.25,0,0,0,3.00,0\nUS,Christus Health,Logging,0,0,0,0,0,1.08\nUS,Payer Location,MRO Payer Project,0,0,0,0,0,2.00\n";
+                const csvContent = "geography,location,process_type,nrs_rate,other_processing_rate,processed_rate,file_drop_rate,manual_rate,payout_rate,billing_rate\nUS,Fairview Processing,Processing,2.25,0,0,0,3.00,3.00,0\nUS,Christus Health,Logging,0,0,0,0,0,0,1.08\nUS,Payer Location,MRO Payer Project,0,0,0,0,0,0,2.00\n";
                 const blob = new Blob([csvContent], { type: "text/csv" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
@@ -888,6 +959,22 @@ const handleDeleteGeography = (geography, e) => {
               <ArrowDownTrayIcon className="w-4 h-4" />
               MRO Template
             </button>
+
+            <button
+              onClick={() => {
+                const csvContent = "geography,process type,rate,flat rate\nUS,Correspondence Letter,2.50,1.20\nUS,Charts Fulfilled,3.00,1.50\n";
+                const blob = new Blob([csvContent], { type: "text/csv" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = "datavant-template.csv";
+                a.click();
+              }}
+              className="text-purple-600 border border-purple-300 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-purple-50 transition text-sm"
+            >
+              <ArrowDownTrayIcon className="w-4 h-4" />
+              Datavant Template
+            </button>
           </div>
         </div>
 
@@ -896,7 +983,7 @@ const handleDeleteGeography = (geography, e) => {
           <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 shadow-sm text-sm">
             <h3 className="font-semibold text-indigo-800 mb-2"> Verisma CSV Format</h3>
             <pre className="bg-white border rounded-lg p-3 overflow-x-auto text-xs">
-geography,client,process type,location,request type,rate,flat rate</pre>
+geography,client,process type,location,request type,payout rate</pre>
             <div className="mt-2 text-xs text-gray-600">
               <strong>Request Types:</strong> New Request, Key, Duplicate
             </div>
@@ -908,7 +995,7 @@ geography,client,process type,location,request type,rate,flat rate</pre>
           <div className="bg-green-50 border border-green-200 rounded-xl p-4 shadow-sm text-sm">
             <h3 className="font-semibold text-green-800 mb-2">MRO CSV Format</h3>
             <pre className="bg-white border rounded-lg p-3 overflow-x-auto text-xs">
-geography,location,process_type,nrs_rate,other_processing_rate,processed_rate,file_drop_rate,manual_rate,flatrate</pre>
+geography,location,process_type,nrs_rate,other_processing_rate,processed_rate,file_drop_rate,manual_rate,payout_rate,billing_rate</pre>
             <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
               <div className="bg-teal-100 rounded p-2">
                 <strong>Process Types:</strong><br/>Processing, Logging, MRO Payer Project
@@ -919,6 +1006,26 @@ geography,location,process_type,nrs_rate,other_processing_rate,processed_rate,fi
               <div className="bg-purple-100 rounded p-2">
                 <strong>Requestor Types (Processing):</strong><br/>NRS-NO Records, Other Processing, Processed, File Drop, Manual
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Datavant CSV Format Info */}
+        {showDatavantCsvFormat && (
+          <div className="bg-purple-50 border border-purple-200 rounded-xl p-4 shadow-sm text-sm">
+            <h3 className="font-semibold text-purple-800 mb-2">Datavant CSV Format</h3>
+            <pre className="bg-white border rounded-lg p-3 overflow-x-auto text-xs">
+geography,process type,rate,flat rate</pre>
+            <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+              <div className="bg-blue-100 rounded p-2">
+                <strong>Rate:</strong> Billing rate per case charged to client
+              </div>
+              <div className="bg-purple-100 rounded p-2">
+                <strong>Flat Rate:</strong> Payout rate per case paid to resource
+              </div>
+            </div>
+            <div className="mt-2 text-xs text-gray-600">
+              <strong>Process Types:</strong> Correspondence Letter, Charts Fulfilled (location defaults to process type name)
             </div>
           </div>
         )}
@@ -1092,7 +1199,7 @@ geography,location,process_type,nrs_rate,other_processing_rate,processed_rate,fi
                                           <div className="text-center text-gray-500 py-4">No locations found</div>
                                         ) : (
                                           <div className="rounded-lg overflow-hidden border">
-                                            {renderLocationTable(subprojects, isMRO, project.name, project._id, subprojectCache)}
+                                            {renderLocationTable(subprojects, isMRO, project.name, project._id, subprojectCache, client.name)}
                                           </div>
                                         )}
                                       </td>

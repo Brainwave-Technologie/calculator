@@ -4,7 +4,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { toast } from 'react-hot-toast';
 
-const apiBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000/api';
+const apiBaseUrl = import.meta.env.VITE_BACKEND_URL  ;
 
 const RequestTypeBadge = ({ type }) => {
   if (!type) return <span className="text-gray-400 text-xs">—</span>;

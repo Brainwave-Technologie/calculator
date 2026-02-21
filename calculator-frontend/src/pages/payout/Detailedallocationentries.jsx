@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-const apiBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000/api';
+const apiBaseUrl = import.meta.env.VITE_BACKEND_URL  ;
 
 // ============================================
 // REUSABLE COMPONENTS

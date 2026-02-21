@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 
-const apiBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000/api';
+const apiBaseUrl = import.meta.env.VITE_BACKEND_URL  ;
 
 const Invoices = () => {
   const [invoices, setInvoices] = useState([]);

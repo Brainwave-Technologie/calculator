@@ -69,7 +69,7 @@ router.post("/verisma-bulk-upload", upload.single("file"), async (req, res) => {
               if (cleanHeader.includes("process type")) return "project_name";
               if (cleanHeader.includes("location")) return "subproject_name";
               if (cleanHeader.includes("request type")) return "request_type";
-              if (cleanHeader.includes("costing rate") || cleanHeader === "rate") return "rate";
+              if (cleanHeader.includes("costing rate") || cleanHeader === "rate" || cleanHeader === "payout rate" || cleanHeader === "payout_rate") return "rate";
               if (cleanHeader.includes("flat rate")) return "flatrate";
               return header;
             },
@@ -96,12 +96,12 @@ router.post("/verisma-bulk-upload", upload.single("file"), async (req, res) => {
       const project_name = norm(r.project_name);
       const subproject_name = norm(r.subproject_name);
       let request_type = norm(r.request_type);
-      
+
       const rateStr = r.rate !== undefined ? String(r.rate).trim() : "0";
       const rate = parseFloat(rateStr);
 
       const flatrateStr = r.flatrate !== undefined ? String(r.flatrate).trim() : "0";
-      const flatrate = parseFloat(flatrateStr);
+      const flatrate = isNaN(parseFloat(flatrateStr)) ? 0 : parseFloat(flatrateStr);
 
       const rowOut = {
         __row: idx + 1,
@@ -121,8 +121,7 @@ router.post("/verisma-bulk-upload", upload.single("file"), async (req, res) => {
       if (!project_name) rowErrors.push("Process Type required");
       if (!subproject_name) rowErrors.push("Location required");
       if (!request_type) rowErrors.push("Request Type required");
-      if (isNaN(rate)) rowErrors.push("Rate must be a number");
-      if (isNaN(flatrate)) rowErrors.push("Flat Rate must be a number");
+      if (isNaN(rate)) rowErrors.push("Payout Rate must be a number");
 
       const matchedType = ALL_REQUEST_TYPES.find(
         (t) => t.toLowerCase() === request_type.toLowerCase()
@@ -420,7 +419,7 @@ router.post("/verisma-bulk-upload-replace", upload.single("file"), async (req, r
               if (cleanHeader.includes("process type")) return "project_name";
               if (cleanHeader.includes("location")) return "subproject_name";
               if (cleanHeader.includes("request type")) return "request_type";
-              if (cleanHeader.includes("costing rate") || cleanHeader === "rate") return "rate";
+              if (cleanHeader.includes("costing rate") || cleanHeader === "rate" || cleanHeader === "payout rate" || cleanHeader === "payout_rate") return "rate";
               if (cleanHeader.includes("flat rate")) return "flatrate";
               return header;
             },
@@ -452,7 +451,7 @@ router.post("/verisma-bulk-upload-replace", upload.single("file"), async (req, r
       const rate = parseFloat(rateStr);
 
       const flatrateStr = r.flatrate !== undefined ? String(r.flatrate).trim() : "0";
-      const flatrate = parseFloat(flatrateStr);
+      const flatrate = isNaN(parseFloat(flatrateStr)) ? 0 : parseFloat(flatrateStr);
 
       const rowOut = {
         __row: idx + 1,
@@ -472,8 +471,7 @@ router.post("/verisma-bulk-upload-replace", upload.single("file"), async (req, r
       if (!project_name) rowErrors.push("Process Type required");
       if (!subproject_name) rowErrors.push("Location required");
       if (!request_type) rowErrors.push("Request Type required");
-      if (isNaN(rate)) rowErrors.push("Rate must be a number");
-      if (isNaN(flatrate)) rowErrors.push("Flat Rate must be a number");
+      if (isNaN(rate)) rowErrors.push("Payout Rate must be a number");
 
       const matchedType = ALL_REQUEST_TYPES.find(
         (t) => t.toLowerCase() === request_type.toLowerCase()
@@ -756,14 +754,13 @@ router.post("/verisma-bulk-upload-replace", upload.single("file"), async (req, r
 function sendErrorCsv(res, filePath, errors) {
   try {
     const fields = [
-      "__row", 
-      "geography", 
-      "client", 
-      "project_name", 
-      "subproject_name", 
-      "request_type", 
-      "rate", 
-      "flatrate", 
+      "__row",
+      "geography",
+      "client",
+      "project_name",
+      "subproject_name",
+      "request_type",
+      "rate",
       "errors"
     ];
     const parser = new Parser({ fields });

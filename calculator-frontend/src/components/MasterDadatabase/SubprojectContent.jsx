@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { ChevronDown, ChevronRight, Search, Loader2 } from "lucide-react";
 
-const BackendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000/api';
+const BackendUrl = import.meta.env.VITE_BACKEND_URL  ;
 
 const SubprojectsContent = () => {
   // Projects state

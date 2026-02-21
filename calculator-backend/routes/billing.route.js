@@ -240,8 +240,8 @@ router.get('/live/:client', async (req, res) => {
       }
       record.rate = costRate;
       
-      // Estimate hours (can be overridden by admin)
-      record.hours = record.cases * 0.5; // Default estimate
+      // Default hours = 0 (admin enters actual hours in Costing dashboard)
+      record.hours = 0;
       record.costing = record.hours * record.rate;
       record.profit = record.total_amount - record.costing;
       record.billable_status = 'Billable';
@@ -363,7 +363,7 @@ router.get('/client-dashboard', async (req, res) => {
         }
       }
       record.rate = costRate;
-      record.hours = record.hours || record.cases * 0.5;
+      record.hours = record.hours || 0;
       record.costing = record.hours * record.rate;
       record.profit = record.total_amount - record.costing;
       record.billable_status = 'Billable';
@@ -408,6 +408,49 @@ router.get('/client-dashboard', async (req, res) => {
     
   } catch (err) {
     console.error('Client dashboard error:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// GET RESOURCE HOURS (admin-saved hours from Billing collection)
+// Used by Payout Calculator to get accurate hours entered in Costing dashboard
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * GET /billing/resource-hours
+ * Returns total hours per resource_email from saved Billing records for a month/year
+ */
+router.get('/resource-hours', async (req, res) => {
+  try {
+    const { month, year } = req.query;
+    const monthNum = parseInt(month) || new Date().getMonth() + 1;
+    const yearNum = parseInt(year) || new Date().getFullYear();
+
+    const records = await Billing.find({
+      month: monthNum,
+      year: yearNum,
+      hours: { $gt: 0 }
+    }).select('resource_email resource_name hours resource_id').lean();
+
+    // Aggregate hours by resource_email
+    const hoursMap = {};
+    records.forEach(r => {
+      const email = r.resource_email?.toLowerCase();
+      if (email) {
+        hoursMap[email] = (hoursMap[email] || 0) + (r.hours || 0);
+      }
+    });
+
+    res.json({
+      success: true,
+      month: monthNum,
+      year: yearNum,
+      hoursMap,
+      resourceCount: Object.keys(hoursMap).length
+    });
+  } catch (err) {
+    console.error('Resource hours error:', err);
     res.status(500).json({ message: err.message });
   }
 });
@@ -535,10 +578,10 @@ router.get('/totals', async (req, res) => {
         }
       }
       record.rate = costRate;
-      record.hours = record.cases * 0.5;
-      record.costing = record.hours * record.rate;
+      record.hours = 0;
+      record.costing = 0;
     }
-    
+
     const revenue = records.reduce((sum, r) => sum + (r.total_amount || 0), 0);
     const cost = records.reduce((sum, r) => sum + (r.costing || 0), 0);
     
@@ -593,11 +636,11 @@ router.get('/export/:client', async (req, res) => {
         }
       }
       record.rate = costRate;
-      record.hours = record.cases * 0.5;
-      record.costing = record.hours * record.rate;
-      record.profit = record.total_amount - record.costing;
+      record.hours = 0;
+      record.costing = 0;
+      record.profit = record.total_amount;
     }
-    
+
     // Create Excel
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet(`${client} Billing`);
@@ -731,7 +774,7 @@ router.post('/sync/:client', async (req, res) => {
           year: yearNum
         };
         
-        const hours = record.cases * 0.5;
+        const hours = 0;
         const costing = hours * costRate;
         const flatrate = subproject?.flatrate || record.flatrate || 0;
         const totalAmount = record.cases * flatrate;

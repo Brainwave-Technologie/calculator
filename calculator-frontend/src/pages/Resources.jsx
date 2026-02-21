@@ -250,12 +250,12 @@ const ViewAssignmentsModal = React.memo(({ isOpen, onClose, resource }) => {
                     </div>
                   </div>
                   <div className="p-4">
-                    <div className="flex items-center gap-2 mb-3"><MapPinIcon className="w-4 h-4 text-green-600" /><span className="text-sm font-medium text-gray-700">Locations ({assignment.subprojects?.length || 0})</span></div>
+                    <div className="flex items-center gap-2 mb-3"><MapPinIcon className="w-4 h-4 text-green-600" /><span className="text-sm font-medium text-gray-700">{assignment.client_name?.toLowerCase() === 'datavant' ? 'Process Types' : 'Locations'} ({assignment.subprojects?.length || 0})</span></div>
                     {assignment.subprojects && assignment.subprojects.length > 0 ? (
                       <div className="flex flex-wrap gap-2">
                         {assignment.subprojects.map((sp, spIdx) => (<span key={spIdx} className="inline-flex items-center px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm font-medium border border-green-200">{sp.subproject_name}</span>))}
                       </div>
-                    ) : (<p className="text-sm text-gray-400">No locations assigned</p>)}
+                    ) : (<p className="text-sm text-gray-400">{assignment.client_name?.toLowerCase() === 'datavant' ? 'No process types assigned' : 'No locations assigned'}</p>)}
                   </div>
                 </div>
               ))}
@@ -282,6 +282,10 @@ const AssignLocationsModal = React.memo(({ isOpen, onClose, resource, onSave }) 
   const [loadingGeo, setLoadingGeo] = useState(false);
   const [dropdownData, setDropdownData] = useState({});
   const [loadingStates, setLoadingStates] = useState({});
+  const [resourceName, setResourceName] = useState('');
+  const [resourceEmail, setResourceEmail] = useState('');
+  const [resourceRole, setResourceRole] = useState('associate');
+  const [resourceErrors, setResourceErrors] = useState({});
 
   const createEmptyAssignment = useCallback(() => ({
     id: `new-${Date.now()}-${Math.random()}`,
@@ -330,6 +334,10 @@ const AssignLocationsModal = React.memo(({ isOpen, onClose, resource, onSave }) 
 
   useEffect(() => {
     if (isOpen && resource) {
+      setResourceName(resource.name || '');
+      setResourceEmail(resource.email || '');
+      setResourceRole(resource.role || 'associate');
+      setResourceErrors({});
       const existingAssignments = resource.assignments || [];
       if (existingAssignments.length > 0) {
         const mapped = existingAssignments.map((a, idx) => ({
@@ -397,10 +405,17 @@ const AssignLocationsModal = React.memo(({ isOpen, onClose, resource, onSave }) 
   };
 
   const handleSubmit = async () => {
+    const newErrors = {};
+    if (!resourceName.trim()) newErrors.name = 'Name is required';
+    if (!resourceEmail.trim()) newErrors.email = 'Email is required';
+    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resourceEmail)) newErrors.email = 'Invalid email format';
+    if (Object.keys(newErrors).length > 0) { setResourceErrors(newErrors); return; }
+
     const validAssignments = assignments.filter(a => a.geography_id && a.client_id && a.project_id && a.selectedLocations.length > 0);
     if (validAssignments.length === 0) { toast.error("Please complete at least one assignment with locations selected"); return; }
     setIsSubmitting(true);
     try {
+      await apiService.updateResource(resource._id, { name: resourceName.trim(), email: resourceEmail.trim(), role: resourceRole });
       const formattedAssignments = validAssignments.map(a => ({ geography_id: a.geography_id, geography_name: a.geography_name, client_id: a.client_id, client_name: a.client_name, project_id: a.project_id, project_name: a.project_name, subprojects: a.subprojects }));
       await onSave(formattedAssignments);
       onClose();
@@ -415,12 +430,37 @@ const AssignLocationsModal = React.memo(({ isOpen, onClose, resource, onSave }) 
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col">
         <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between bg-gradient-to-r from-green-50 to-emerald-50">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-green-100"><MapPinIcon className="w-6 h-6 text-green-600" /></div>
-            <div><h2 className="text-lg font-bold text-gray-900">Assign Locations</h2><p className="text-sm text-gray-500">{resource.name} • {resource.email}</p></div>
+            <div className="p-2 rounded-lg bg-green-100"><PencilSquareIcon className="w-6 h-6 text-green-600" /></div>
+            <div><h2 className="text-lg font-bold text-gray-900">Edit Resource</h2><p className="text-sm text-gray-500">{resource.name} • {resource.email}</p></div>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-2 hover:bg-white rounded-lg transition"><XMarkIcon className="w-6 h-6" /></button>
         </div>
         <div className="flex-1 overflow-y-auto p-6">
+          {/* Resource Details Section */}
+          <div className="border border-blue-200 rounded-xl p-4 bg-blue-50 mb-4">
+            <h3 className="text-sm font-semibold text-blue-800 mb-3">Resource Details</h3>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Name <span className="text-red-500">*</span></label>
+                <input type="text" value={resourceName} onChange={(e) => { setResourceName(e.target.value); if (resourceErrors.name) setResourceErrors(prev => ({ ...prev, name: '' })); }} placeholder="Full name" className={`w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none ${resourceErrors.name ? 'border-red-300 bg-red-50' : 'border-gray-300 bg-white'}`} />
+                {resourceErrors.name && <p className="mt-1 text-xs text-red-500">{resourceErrors.name}</p>}
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Email <span className="text-red-500">*</span></label>
+                <input type="email" value={resourceEmail} onChange={(e) => { setResourceEmail(e.target.value); if (resourceErrors.email) setResourceErrors(prev => ({ ...prev, email: '' })); }} placeholder="Email address" className={`w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none ${resourceErrors.email ? 'border-red-300 bg-red-50' : 'border-gray-300 bg-white'}`} />
+                {resourceErrors.email && <p className="mt-1 text-xs text-red-500">{resourceErrors.email}</p>}
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Role</label>
+                <select value={resourceRole} onChange={(e) => setResourceRole(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white">
+                  <option value="associate">Associate</option>
+                  <option value="senior_associate">Senior Associate</option>
+                  <option value="team_lead">Team Lead</option>
+                  <option value="manager">Manager</option>
+                </select>
+              </div>
+            </div>
+          </div>
           <div className="space-y-4">
             {assignments.map((assignment, index) => (
               <div key={assignment.id} className="border border-gray-200 rounded-xl p-4 bg-gray-50">
@@ -432,11 +472,11 @@ const AssignLocationsModal = React.memo(({ isOpen, onClose, resource, onSave }) 
                   <div><label className="block text-xs font-medium text-gray-600 mb-1">Geography *</label><FilterSelect placeholder="Select Geography" value={assignment.geography_id} onChange={(value) => handleGeographyChange(assignment.id, value)} options={geographies} loading={loadingGeo} /></div>
                   <div><label className="block text-xs font-medium text-gray-600 mb-1">Client *</label><FilterSelect placeholder="Select Client" value={assignment.client_id} onChange={(value) => handleClientChange(assignment.id, value)} options={dropdownData[`${assignment.id}-clients`] || []} disabled={!assignment.geography_id} loading={loadingStates[`${assignment.id}-client`]} /></div>
                   <div><label className="block text-xs font-medium text-gray-600 mb-1">Process Type *</label><FilterSelect placeholder="Select Process Type" value={assignment.project_id} onChange={(value) => handleProjectChange(assignment.id, value)} options={dropdownData[`${assignment.id}-projects`] || []} disabled={!assignment.client_id} loading={loadingStates[`${assignment.id}-project`]} /></div>
-                  <div><label className="block text-xs font-medium text-gray-600 mb-1">Locations *</label><MultiSelectDropdown placeholder="Select Locations" selectedValues={assignment.selectedLocations} onChange={(values) => handleLocationsChange(assignment.id, values)} options={dropdownData[`${assignment.id}-locations`] || []} disabled={!assignment.project_id} loading={loadingStates[`${assignment.id}-location`]} /></div>
+                  <div><label className="block text-xs font-medium text-gray-600 mb-1">{assignment.client_name?.toLowerCase() === 'datavant' ? 'Process Types *' : 'Locations *'}</label><MultiSelectDropdown placeholder={assignment.client_name?.toLowerCase() === 'datavant' ? 'Select Process Types' : 'Select Locations'} selectedValues={assignment.selectedLocations} onChange={(values) => handleLocationsChange(assignment.id, values)} options={dropdownData[`${assignment.id}-locations`] || []} disabled={!assignment.project_id} loading={loadingStates[`${assignment.id}-location`]} /></div>
                 </div>
                 {assignment.subprojects.length > 0 && (
                   <div className="mt-3 pt-3 border-t border-gray-200">
-                    <div className="flex items-center gap-2 mb-2"><MapPinIcon className="w-4 h-4 text-green-600" /><span className="text-xs font-medium text-gray-600">Selected Locations ({assignment.subprojects.length})</span></div>
+                    <div className="flex items-center gap-2 mb-2"><MapPinIcon className="w-4 h-4 text-green-600" /><span className="text-xs font-medium text-gray-600">{assignment.client_name?.toLowerCase() === 'datavant' ? 'Selected Process Types' : 'Selected Locations'} ({assignment.subprojects.length})</span></div>
                     <div className="flex flex-wrap gap-1.5">{assignment.subprojects.map((sp, spIdx) => (<span key={spIdx} className="inline-flex items-center px-2 py-1 bg-green-100 text-green-700 rounded text-xs font-medium">{sp.subproject_name}</span>))}</div>
                   </div>
                 )}
@@ -451,7 +491,7 @@ const AssignLocationsModal = React.memo(({ isOpen, onClose, resource, onSave }) 
             <div className="flex items-center gap-3">
               <button onClick={onClose} disabled={isSubmitting} className="px-5 py-2.5 border border-gray-300 text-gray-700 rounded-xl hover:bg-gray-100 font-medium transition disabled:opacity-50">Cancel</button>
               <button onClick={handleSubmit} disabled={isSubmitting} className="px-5 py-2.5 bg-green-600 text-white rounded-xl hover:bg-green-700 font-medium transition flex items-center gap-2 disabled:opacity-50">
-                {isSubmitting ? (<><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div><span>Saving...</span></>) : (<><MapPinIcon className="w-5 h-5" /><span>Save Assignments</span></>)}
+                {isSubmitting ? (<><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div><span>Saving...</span></>) : (<><PencilSquareIcon className="w-5 h-5" /><span>Save Changes</span></>)}
               </button>
             </div>
           </div>
@@ -636,7 +676,7 @@ const AddResourceModal = React.memo(({ isOpen, onClose, onSave }) => {
                     <div><label className="block text-xs font-medium text-gray-600 mb-1">Geography</label><FilterSelect placeholder="Select Geography" value={assignment.geography_id} onChange={(value) => handleGeographyChange(assignment.id, value)} options={geographies} loading={loadingGeo} /></div>
                     <div><label className="block text-xs font-medium text-gray-600 mb-1">Client</label><FilterSelect placeholder="Select Client" value={assignment.client_id} onChange={(value) => handleClientChange(assignment.id, value)} options={dropdownData[`${assignment.id}-clients`] || []} disabled={!assignment.geography_id} loading={loadingStates[`${assignment.id}-client`]} /></div>
                     <div><label className="block text-xs font-medium text-gray-600 mb-1">Process Type</label><FilterSelect placeholder="Select Process Type" value={assignment.project_id} onChange={(value) => handleProjectChange(assignment.id, value)} options={dropdownData[`${assignment.id}-projects`] || []} disabled={!assignment.client_id} loading={loadingStates[`${assignment.id}-project`]} /></div>
-                    <div><label className="block text-xs font-medium text-gray-600 mb-1">Locations</label><MultiSelectDropdown placeholder="Select Locations" selectedValues={assignment.selectedLocations} onChange={(values) => handleLocationsChange(assignment.id, values)} options={dropdownData[`${assignment.id}-locations`] || []} disabled={!assignment.project_id} loading={loadingStates[`${assignment.id}-location`]} /></div>
+                    <div><label className="block text-xs font-medium text-gray-600 mb-1">{assignment.client_name?.toLowerCase() === 'datavant' ? 'Process Types' : 'Locations'}</label><MultiSelectDropdown placeholder={assignment.client_name?.toLowerCase() === 'datavant' ? 'Select Process Types' : 'Select Locations'} selectedValues={assignment.selectedLocations} onChange={(values) => handleLocationsChange(assignment.id, values)} options={dropdownData[`${assignment.id}-locations`] || []} disabled={!assignment.project_id} loading={loadingStates[`${assignment.id}-location`]} /></div>
                   </div>
                   {assignment.subprojects.length > 0 && (<div className="mt-3 pt-3 border-t border-gray-200"><div className="flex items-center gap-2 mb-2"><MapPinIcon className="w-4 h-4 text-green-600" /><span className="text-xs font-medium text-gray-600">Selected ({assignment.subprojects.length})</span></div><div className="flex flex-wrap gap-1.5">{assignment.subprojects.map((sp, spIdx) => (<span key={spIdx} className="inline-flex items-center px-2 py-1 bg-green-100 text-green-700 rounded text-xs font-medium">{sp.subproject_name}</span>))}</div></div>)}
                 </div>

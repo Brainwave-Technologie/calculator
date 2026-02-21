@@ -23,8 +23,8 @@ function normalizeName(name) {
 // ============================================
 // DATAVANT CONSTANTS
 // ============================================
-const DATAVANT_REQUEST_TYPES = ['New Request', 'Follow up'];
-const DATAVANT_TASK_TYPES = ['Data Entry', 'QA', 'Verification', 'Processing', 'Other'];
+// Location is now optional - defaults to process_type name when not provided
+// Rate is stored with 'Default' key (one rate per process type, not per request type)
 
 // ============================================
 // HELPER: Generate business key for Datavant
@@ -85,10 +85,10 @@ router.post("/datavant-bulk-upload", upload.single("file"), async (req, res) => 
 
     rows.forEach((r, idx) => {
       const geography = norm(r.geography) || "US";
-      const location = norm(r.location);
       let process_type = norm(r.process_type);
-      let request_type = norm(r.request_type);
-      
+      // Location defaults to process_type when not provided
+      const location = norm(r.location) || process_type;
+
       const rate = parseFloat(r.rate) || 0;
       const flatrate = parseFloat(r.flatrate) || 0;
 
@@ -97,25 +97,13 @@ router.post("/datavant-bulk-upload", upload.single("file"), async (req, res) => 
         geography,
         location,
         process_type,
-        request_type,
         rate,
         flatrate,
       };
 
       const rowErrors = [];
 
-      if (!location) rowErrors.push("Location required");
       if (!process_type) rowErrors.push("Process Type required");
-
-      // Request type is optional for Datavant
-      if (request_type) {
-        const matchedRequestType = DATAVANT_REQUEST_TYPES.find(
-          (t) => t.toLowerCase() === request_type.toLowerCase()
-        );
-        if (matchedRequestType) {
-          rowOut.request_type = matchedRequestType;
-        }
-      }
 
       const uniqueKey = `${normalizeName(geography)}|${normalizeName(process_type)}|${normalizeName(location)}`;
       if (csvDuplicateCheck.has(uniqueKey)) {
@@ -166,18 +154,14 @@ router.post("/datavant-bulk-upload", upload.single("file"), async (req, res) => 
         project.subprojects.set(subKey, {
           name: r.location,
           flatrate: r.flatrate,
-          rates: new Map()
+          rate: r.rate
         });
       }
 
       const subproject = project.subprojects.get(subKey);
-      if (r.request_type) {
-        subproject.rates.set(r.request_type, r.rate);
-      }
-      
-      if (r.flatrate > subproject.flatrate) {
-        subproject.flatrate = r.flatrate;
-      }
+      // Keep the highest flatrate and rate
+      if (r.flatrate > subproject.flatrate) subproject.flatrate = r.flatrate;
+      if (r.rate > subproject.rate) subproject.rate = r.rate;
     }
 
     console.log(`📊 Found ${geographyMap.size} unique geographies`);
@@ -298,25 +282,21 @@ router.post("/datavant-bulk-upload", upload.single("file"), async (req, res) => 
             console.log(`  ✅ Created: ${subData.name} (ID: ${subproject._id})`);
           }
 
-          // UPSERT Request Types
-          for (const reqType of DATAVANT_REQUEST_TYPES) {
-            const rate = subData.rates.get(reqType) || 0;
-            
-            await SubprojectRequestType.findOneAndUpdate(
-              { subproject_id: subproject._id, name: reqType },
-              {
-                $set: { rate: rate },
-                $setOnInsert: {
-                  geography_id: geography._id,
-                  client_id: datavantClient._id,
-                  project_id: project._id,
-                  name: reqType
-                }
-              },
-              { upsert: true, new: true }
-            );
-            stats.requestTypes++;
-          }
+          // UPSERT rate with 'Default' key (one billing rate per process type)
+          await SubprojectRequestType.findOneAndUpdate(
+            { subproject_id: subproject._id, name: 'Default' },
+            {
+              $set: { rate: subData.rate },
+              $setOnInsert: {
+                geography_id: geography._id,
+                client_id: datavantClient._id,
+                project_id: project._id,
+                name: 'Default'
+              }
+            },
+            { upsert: true, new: true }
+          );
+          stats.requestTypes++;
         }
 
         console.log(`  📦 Processed ${projData.subprojects.size} locations under ${projData.name}`);
@@ -385,19 +365,18 @@ router.post("/datavant-bulk-upload-replace", upload.single("file"), async (req, 
 
     for (const r of rows) {
       const geography = norm(r.geography) || "US";
-      const location = norm(r.location);
       const process_type = norm(r.process_type);
-      const request_type = norm(r.request_type);
+      const location = norm(r.location) || process_type; // default to process_type
       const rate = parseFloat(r.rate) || 0;
       const flatrate = parseFloat(r.flatrate) || 0;
 
-      if (!location || !process_type) continue;
+      if (!process_type) continue;
 
       const uniqueKey = `${normalizeName(geography)}|${normalizeName(process_type)}|${normalizeName(location)}`;
       if (csvDuplicateCheck.has(uniqueKey)) continue;
       csvDuplicateCheck.add(uniqueKey);
 
-      validRows.push({ geography, location, process_type, request_type, rate, flatrate });
+      validRows.push({ geography, location, process_type, rate, flatrate });
     }
 
     if (validRows.length === 0) {
@@ -425,11 +404,11 @@ router.post("/datavant-bulk-upload-replace", upload.single("file"), async (req, 
       const project = geography.projects.get(projKey);
 
       if (!project.subprojects.has(subKey)) {
-        project.subprojects.set(subKey, { name: r.location, flatrate: r.flatrate, rates: new Map() });
+        project.subprojects.set(subKey, { name: r.location, flatrate: r.flatrate, rate: r.rate });
       }
       const subproject = project.subprojects.get(subKey);
-      if (r.request_type) subproject.rates.set(r.request_type, r.rate);
       if (r.flatrate > subproject.flatrate) subproject.flatrate = r.flatrate;
+      if (r.rate > subproject.rate) subproject.rate = r.rate;
     }
 
     const stats = {
@@ -495,15 +474,13 @@ router.post("/datavant-bulk-upload-replace", upload.single("file"), async (req, 
             stats.subprojects.created++;
           }
 
-          for (const reqType of DATAVANT_REQUEST_TYPES) {
-            const rate = subData.rates.get(reqType) || 0;
-            await SubprojectRequestType.findOneAndUpdate(
-              { subproject_id: subproject._id, name: reqType },
-              { $set: { rate }, $setOnInsert: { geography_id: geography._id, client_id: datavantClient._id, project_id: project._id, name: reqType } },
-              { upsert: true }
-            );
-            stats.requestTypes++;
-          }
+          // Store billing rate with 'Default' key (one rate per process type)
+          await SubprojectRequestType.findOneAndUpdate(
+            { subproject_id: subproject._id, name: 'Default' },
+            { $set: { rate: subData.rate || 0 }, $setOnInsert: { geography_id: geography._id, client_id: datavantClient._id, project_id: project._id, name: 'Default' } },
+            { upsert: true }
+          );
+          stats.requestTypes++;
         }
       }
     }

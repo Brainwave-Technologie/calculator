@@ -362,13 +362,17 @@ ResourceSchema.statics.removeAssignment = async function(resourceEmail, subproje
 };
 
 // Static method to check if can send OTP
-ResourceSchema.statics.canSendOTP = function(resource) {
+ResourceSchema.statics.canSendOTP = function (resource) {
   if (!resource.otp_last_sent) return true;
-  
-  const timeSinceLastOTP = Date.now() - resource.otp_last_sent.getTime();
-  const minInterval = 60 * 1000;
-  
-  return timeSinceLastOTP >= minInterval;
+
+  const COOLDOWN_MS = 20 * 1000; // 🔥 20 seconds
+  const now = Date.now();
+  const lastSent = resource.otp_last_sent.getTime();
+
+  // guard against future timestamps
+  if (lastSent > now) return true;
+
+  return now - lastSent >= COOLDOWN_MS;
 };
 
 // Static method to invalidate expired sessions

@@ -93,7 +93,8 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
               if (h === "processed rate" || h === "processed_rate") return "processed_rate";
               if (h.includes("file drop") && h.includes("rate")) return "file_drop_rate";
               if (h.includes("manual") && h.includes("rate")) return "manual_rate";
-              if (h === "flatrate" || h === "flat rate" || (h.includes("logging") && h.includes("rate"))) return "flatrate";
+              if (h === "payout_rate" || h === "payout rate") return "payout_rate";
+              if (h === "flatrate" || h === "flat rate" || h === "billing_rate" || h === "billing rate" || (h.includes("logging") && h.includes("rate"))) return "flatrate";
               return header;
             },
           })
@@ -117,12 +118,13 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
       const geography = norm(r.geography) || "US";
       const location = norm(r.location);
       let process_type = norm(r.process_type);
-      
+
       const nrs_rate = parseFloat(r.nrs_rate) || MRO_DEFAULT_PRICING.Processing['NRS-NO Records'];
       const other_processing_rate = parseFloat(r.other_processing_rate) || 0;
       const processed_rate = parseFloat(r.processed_rate) || 0;
       const file_drop_rate = parseFloat(r.file_drop_rate) || 0;
       const manual_rate = parseFloat(r.manual_rate) || MRO_DEFAULT_PRICING.Processing['Manual'];
+      const payout_rate = parseFloat(r.payout_rate) || 0;
       const flatrate = parseFloat(r.flatrate) || MRO_DEFAULT_PRICING.Logging.flatrate;
 
       const rowOut = {
@@ -135,6 +137,7 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
         processed_rate,
         file_drop_rate,
         manual_rate,
+        payout_rate,
         flatrate,
       };
 
@@ -205,6 +208,7 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
           processed_rate: r.processed_rate,
           file_drop_rate: r.file_drop_rate,
           manual_rate: r.manual_rate,
+          payout_rate: r.payout_rate,
           flatrate: r.flatrate
         });
       }
@@ -299,6 +303,8 @@ router.post("/mro-bulk-upload", upload.single("file"), async (req, res) => {
             flatrate = subData.flatrate || MRO_DEFAULT_PRICING.Logging.flatrate;
           } else if (projData.name === 'MRO Payer Project') {
             flatrate = subData.flatrate || 0;
+          } else if (projData.name === 'Processing') {
+            flatrate = subData.payout_rate || 0;
           }
 
           // Build billing_rates array
@@ -456,7 +462,8 @@ router.post("/mro-bulk-upload-replace", upload.single("file"), async (req, res) 
               if (h === "processed rate" || h === "processed_rate") return "processed_rate";
               if (h.includes("file drop") && h.includes("rate")) return "file_drop_rate";
               if (h.includes("manual") && h.includes("rate")) return "manual_rate";
-              if (h === "flatrate" || h === "flat rate" || (h.includes("logging") && h.includes("rate"))) return "flatrate";
+              if (h === "payout_rate" || h === "payout rate") return "payout_rate";
+              if (h === "flatrate" || h === "flat rate" || h === "billing_rate" || h === "billing rate" || (h.includes("logging") && h.includes("rate"))) return "flatrate";
               return header;
             },
           })
@@ -486,6 +493,7 @@ router.post("/mro-bulk-upload-replace", upload.single("file"), async (req, res) 
       const processed_rate = parseFloat(r.processed_rate) || 0;
       const file_drop_rate = parseFloat(r.file_drop_rate) || 0;
       const manual_rate = parseFloat(r.manual_rate) || MRO_DEFAULT_PRICING.Processing['Manual'];
+      const payout_rate = parseFloat(r.payout_rate) || 0;
       const flatrate = parseFloat(r.flatrate) || MRO_DEFAULT_PRICING.Logging.flatrate;
 
       const rowOut = {
@@ -498,6 +506,7 @@ router.post("/mro-bulk-upload-replace", upload.single("file"), async (req, res) 
         processed_rate,
         file_drop_rate,
         manual_rate,
+        payout_rate,
         flatrate,
       };
 
@@ -567,6 +576,7 @@ router.post("/mro-bulk-upload-replace", upload.single("file"), async (req, res) 
           processed_rate: r.processed_rate,
           file_drop_rate: r.file_drop_rate,
           manual_rate: r.manual_rate,
+          payout_rate: r.payout_rate,
           flatrate: r.flatrate
         });
       }
@@ -643,6 +653,8 @@ router.post("/mro-bulk-upload-replace", upload.single("file"), async (req, res) 
           let flatrate = 0;
           if (projData.name === 'Logging') {
             flatrate = subData.flatrate || MRO_DEFAULT_PRICING.Logging.flatrate;
+          } else if (projData.name === 'Processing') {
+            flatrate = subData.payout_rate || 0;
           }
 
           const billingRates = [];
@@ -789,6 +801,7 @@ function sendErrorCsv(res, filePath, errors) {
       "processed_rate",
       "file_drop_rate",
       "manual_rate",
+      "payout_rate",
       "flatrate",
       "errors"
     ];

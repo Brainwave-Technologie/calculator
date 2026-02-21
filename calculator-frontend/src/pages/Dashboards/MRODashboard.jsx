@@ -4,7 +4,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { toast } from 'react-hot-toast';
 
-const apiBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000/api';
+const apiBaseUrl = import.meta.env.VITE_BACKEND_URL  ;
 
 // Color palette for dynamic columns
 const COLUMN_COLORS = [
@@ -272,13 +272,32 @@ const MRODashboard = () => {
     const processType = filters.process_type || (activeView === 'processing' ? 'Processing' : 'Logging');
 
     if (processType === 'Processing' || activeView === 'processing') {
-      const typeSet = new Set();
-      filtered.filter(a => a.process_type === 'Processing').forEach(a => {
-        if (a.requestor_type) typeSet.add(a.requestor_type);
-        if (a.request_type) typeSet.add(a.request_type);
-      });
-      setAllTypes(Array.from(typeSet).sort());
+      // Fixed billing categories: only NRS-NO Records and Manual
+      const fixedTypes = ['NRS-NO Records', 'Manual'];
+      setAllTypes(fixedTypes);
 
+      // First pass: determine NRS and Manual billing rates per location
+      // from correctly-rated cases (NRS-NO Records and Manual requestor types)
+      const locationRates = {};
+      filtered.forEach(a => {
+        if (a.process_type !== 'Processing') return;
+        const key = a.subproject_id?.toString() || a.subproject_name;
+        if (!locationRates[key]) locationRates[key] = { nrsRate: 0, manualRate: 0 };
+        if (a.requestor_type === 'NRS-NO Records' && a.billing_rate > 0) {
+          locationRates[key].nrsRate = a.billing_rate;
+        }
+        if (a.requestor_type === 'Manual' && a.billing_rate > 0) {
+          locationRates[key].manualRate = a.billing_rate;
+        }
+        // Use 'Processed' billing_rate as fallback for manualRate if set
+        if (a.requestor_type === 'Processed' && a.billing_rate > 0 && !locationRates[key].manualRate) {
+          locationRates[key].manualRate = a.billing_rate;
+        }
+      });
+
+      // Second pass: categorize all allocations into NRS-NO Records or Manual
+      // 'Processed' or 'Manual' requestor_type → Manual column (at Manual rate)
+      // All other requestor_types → NRS-NO Records column (at NRS rate)
       const locMap = new Map();
       filtered.forEach(a => {
         if (a.process_type !== 'Processing') return;
@@ -287,13 +306,20 @@ const MRODashboard = () => {
           locMap.set(key, { location: a.subproject_name, byType: {}, totalCases: 0, totalBilling: 0 });
         }
         const entry = locMap.get(key);
-        const typeKey = a.requestor_type || a.request_type || 'Other';
-        if (!entry.byType[typeKey]) entry.byType[typeKey] = { cases: 0, rate: a.billing_rate || 0, total: 0 };
+        const rates = locationRates[key] || { nrsRate: 0, manualRate: 0 };
+
+        const typeKey = (a.requestor_type === 'Processed' || a.requestor_type === 'Manual') ? 'Manual' : 'NRS-NO Records';
+        const rate = typeKey === 'Manual'
+          ? (rates.manualRate || a.billing_rate || 0)
+          : (rates.nrsRate || a.billing_rate || 0);
+        const amount = rate;
+
+        if (!entry.byType[typeKey]) entry.byType[typeKey] = { cases: 0, rate: 0, total: 0 };
         entry.byType[typeKey].cases += 1;
-        entry.byType[typeKey].total += a.billing_amount || a.billing_rate || 0;
-        if (a.billing_rate > 0) entry.byType[typeKey].rate = a.billing_rate;
+        entry.byType[typeKey].total += amount;
+        if (rate > 0) entry.byType[typeKey].rate = rate;
         entry.totalCases += 1;
-        entry.totalBilling += a.billing_amount || a.billing_rate || 0;
+        entry.totalBilling += amount;
       });
 
       let summary = Array.from(locMap.values());
@@ -301,9 +327,9 @@ const MRODashboard = () => {
       setProcessingSummary(summary);
 
       const totals = { byType: {}, totalBilling: 0, grandTotal: 0 };
-      Array.from(typeSet).forEach(t => { totals.byType[t] = { cases: 0, total: 0 }; });
+      fixedTypes.forEach(t => { totals.byType[t] = { cases: 0, total: 0 }; });
       summary.forEach(r => {
-        Array.from(typeSet).forEach(t => {
+        fixedTypes.forEach(t => {
           if (r.byType[t]) {
             totals.byType[t].cases += r.byType[t].cases;
             totals.byType[t].total += r.byType[t].total;
@@ -325,7 +351,7 @@ const MRODashboard = () => {
       loggingAllocs.forEach(a => {
         const key = a.subproject_id?.toString() || a.subproject_name;
         if (!locMap.has(key)) {
-          locMap.set(key, { location: a.subproject_name, flatrate: a.billing_rate || 1.08, byType: {}, totalCases: 0, totalBilling: 0 });
+          locMap.set(key, { location: a.subproject_name, billingRate: a.billing_rate || 1.08, byType: {}, totalCases: 0, totalBilling: 0 });
         }
         const entry = locMap.get(key);
         const typeKey = a.request_type || 'Other';
@@ -334,7 +360,7 @@ const MRODashboard = () => {
         entry.byType[typeKey].total += a.billing_amount || a.billing_rate || 1.08;
         entry.totalCases += 1;
         entry.totalBilling += a.billing_amount || a.billing_rate || 1.08;
-        if (a.billing_rate > 0) entry.flatrate = a.billing_rate;
+        if (a.billing_rate > 0) entry.billingRate = a.billing_rate;
       });
 
       let summary = Array.from(locMap.values());
@@ -536,28 +562,28 @@ const MRODashboard = () => {
                     </tr>
                     <tr>
                       <th className="py-2 px-2 text-left font-semibold w-8 border-b">Sr</th>
-                      <th onClick={() => handleSort('location')} className="py-2 px-2 text-left font-semibold min-w-[140px] cursor-pointer hover:bg-slate-200 border-b">Location <SortIcon col="location" /></th>
+                      <th onClick={() => handleSort('location')} className="py-2 px-2 text-left font-semibold min-w-[180px] cursor-pointer hover:bg-slate-200 border-b">Location <SortIcon col="location" /></th>
                       {allTypes.map((t, i) => (
                         <React.Fragment key={t}>
-                          <th className={`py-2 px-1 text-right font-semibold w-10 border-l border-b ${getColumnColor(i).bg}`}>Cs</th>
-                          <th className={`py-2 px-1 text-right font-semibold w-10 border-b ${getColumnColor(i).bg}`}>Rt</th>
-                          <th className={`py-2 px-1 text-right font-semibold w-14 border-b ${getColumnColor(i).bg}`}>Tot</th>
+                          <th className={`py-2 px-3 text-right font-semibold w-36 border-l border-b ${getColumnColor(i).bg}`}>Cases</th>
+                          <th className={`py-2 px-3 text-right font-semibold w-36 border-b ${getColumnColor(i).bg}`}>Payout Rate</th>
+                          <th className={`py-2 px-3 text-right font-semibold w-40 border-b ${getColumnColor(i).bg}`}>Total</th>
                         </React.Fragment>
                       ))}
-                      <th className="py-2 px-2 text-right font-semibold w-14 border-l border-b bg-green-50">Bill</th>
-                      <th className="py-2 px-2 text-right font-semibold w-12 border-b bg-yellow-50">Tot</th>
+                      <th className="py-2 px-3 text-right font-semibold w-40 border-l border-b bg-green-50">Billing</th>
+                      <th className="py-2 px-3 text-right font-semibold w-36 border-b bg-yellow-50">Total</th>
                     </tr>
                   </>
                 ) : (
                   <tr>
                     <th className="py-2 px-2 text-left font-semibold w-8 border-b">Sr</th>
-                    <th onClick={() => handleSort('location')} className="py-2 px-2 text-left font-semibold min-w-[140px] cursor-pointer hover:bg-slate-200 border-b">Location <SortIcon col="location" /></th>
+                    <th onClick={() => handleSort('location')} className="py-2 px-2 text-left font-semibold min-w-[180px] cursor-pointer hover:bg-slate-200 border-b">Location <SortIcon col="location" /></th>
                     {loggingTypes.map((t, i) => (
-                      <th key={t} className={`py-2 px-2 text-right font-semibold w-14 border-b ${getColumnColor(i).header}`}>{t}</th>
+                      <th key={t} className={`py-2 px-3 text-right font-semibold w-36 border-b ${getColumnColor(i).header}`}>{t}</th>
                     ))}
-                    <th className="py-2 px-2 text-right font-semibold w-12 border-b">Rate</th>
-                    <th className="py-2 px-2 text-right font-semibold w-14 border-b bg-blue-50">Total</th>
-                    <th className="py-2 px-2 text-right font-semibold w-16 border-b bg-green-50">Billing</th>
+                    <th className="py-2 px-3 text-right font-semibold w-36 border-b">Billing Rate</th>
+                    <th className="py-2 px-3 text-right font-semibold w-36 border-b bg-blue-50">Total</th>
+                    <th className="py-2 px-3 text-right font-semibold w-40 border-b bg-green-50">Billing</th>
                   </tr>
                 )}
               </thead>
@@ -572,21 +598,21 @@ const MRODashboard = () => {
                       {sortedProcessing.map((r, idx) => (
                         <tr key={idx} className="border-b border-slate-100 hover:bg-slate-50">
                           <td className="py-1.5 px-2 text-slate-500">{idx + 1}</td>
-                          <td className="py-1.5 px-2 font-medium text-slate-800 truncate max-w-[160px]" title={r.location}>{r.location}</td>
+                          <td className="py-1.5 px-2 font-medium text-slate-800" title={r.location}>{r.location}</td>
                           {allTypes.map((t, i) => {
                             const d = r.byType[t];
                             const c = getColumnColor(i);
                             const has = d?.cases > 0;
                             return (
                               <React.Fragment key={t}>
-                                <td className={`py-1.5 px-1 text-right border-l ${has ? `${c.bg} font-medium` : 'text-slate-300'}`}>{d?.cases || 0}</td>
-                                <td className={`py-1.5 px-1 text-right ${has ? c.bg : ''} text-slate-500`}>{d?.rate > 0 ? `$${d.rate.toFixed(2)}` : '-'}</td>
-                                <td className={`py-1.5 px-1 text-right ${has ? `${c.bg} ${c.text} font-medium` : 'text-slate-300'}`}>{has ? `$${d.total.toFixed(0)}` : '$0'}</td>
+                                <td className={`py-1.5 px-3 text-right border-l ${has ? `${c.bg} font-medium` : 'text-slate-300'}`}>{d?.cases || 0}</td>
+                                <td className={`py-1.5 px-3 text-right ${has ? c.bg : ''} text-slate-500`}>{d?.rate > 0 ? `$${d.rate.toFixed(2)}` : '-'}</td>
+                                <td className={`py-1.5 px-3 text-right ${has ? `${c.bg} ${c.text} font-medium` : 'text-slate-300'}`}>{has ? formatCurrency(d.total) : '$0.00'}</td>
                               </React.Fragment>
                             );
                           })}
-                          <td className="py-1.5 px-2 text-right font-semibold text-green-700 border-l bg-green-50/50">{formatCurrency(r.totalBilling)}</td>
-                          <td className="py-1.5 px-2 text-right font-bold text-slate-800 bg-yellow-50/50">{r.totalCases}</td>
+                          <td className="py-1.5 px-3 text-right font-semibold text-green-700 border-l bg-green-50/50">{formatCurrency(r.totalBilling)}</td>
+                          <td className="py-1.5 px-3 text-right font-bold text-slate-800 bg-yellow-50/50">{r.totalCases}</td>
                         </tr>
                       ))}
                       {processingTotals && (
@@ -595,13 +621,13 @@ const MRODashboard = () => {
                           <td className="py-2 px-2">Total</td>
                           {allTypes.map(t => (
                             <React.Fragment key={t}>
-                              <td className="py-2 px-1 text-right border-l border-slate-600">{processingTotals.byType[t]?.cases || 0}</td>
-                              <td className="py-2 px-1"></td>
-                              <td className="py-2 px-1 text-right">${(processingTotals.byType[t]?.total || 0).toFixed(0)}</td>
+                              <td className="py-2 px-3 text-right border-l border-slate-600">{processingTotals.byType[t]?.cases || 0}</td>
+                              <td className="py-2 px-3"></td>
+                              <td className="py-2 px-3 text-right">{formatCurrency(processingTotals.byType[t]?.total || 0)}</td>
                             </React.Fragment>
                           ))}
-                          <td className="py-2 px-2 text-right border-l border-slate-600 bg-green-600">{formatCurrency(processingTotals.totalBilling)}</td>
-                          <td className="py-2 px-2 text-right bg-yellow-600">{processingTotals.grandTotal}</td>
+                          <td className="py-2 px-3 text-right border-l border-slate-600 bg-green-600">{formatCurrency(processingTotals.totalBilling)}</td>
+                          <td className="py-2 px-3 text-right bg-yellow-600">{processingTotals.grandTotal}</td>
                         </tr>
                       )}
                     </>
@@ -614,26 +640,26 @@ const MRODashboard = () => {
                       {sortedLogging.map((r, idx) => (
                         <tr key={idx} className="border-b border-slate-100 hover:bg-slate-50">
                           <td className="py-1.5 px-2 text-slate-500">{idx + 1}</td>
-                          <td className="py-1.5 px-2 font-medium text-slate-800 truncate max-w-[160px]" title={r.location}>{r.location}</td>
+                          <td className="py-1.5 px-2 font-medium text-slate-800" title={r.location}>{r.location}</td>
                           {loggingTypes.map((t, i) => {
                             const d = r.byType[t];
                             const c = getColumnColor(i);
                             const has = d?.cases > 0;
-                            return <td key={t} className={`py-1.5 px-2 text-right ${has ? `${c.bg} ${c.text} font-medium` : 'text-slate-300'}`}>{d?.cases || 0}</td>;
+                            return <td key={t} className={`py-1.5 px-3 text-right ${has ? `${c.bg} ${c.text} font-medium` : 'text-slate-300'}`}>{d?.cases || 0}</td>;
                           })}
-                          <td className="py-1.5 px-2 text-right text-slate-600">${(r.flatrate || 1.08).toFixed(2)}</td>
-                          <td className="py-1.5 px-2 text-right font-medium text-blue-700 bg-blue-50/50">{r.totalCases}</td>
-                          <td className="py-1.5 px-2 text-right font-bold text-green-700 bg-green-50/50">{formatCurrency(r.totalBilling)}</td>
+                          <td className="py-1.5 px-3 text-right text-slate-600">${(r.billingRate || 1.08).toFixed(2)}</td>
+                          <td className="py-1.5 px-3 text-right font-medium text-blue-700 bg-blue-50/50">{r.totalCases}</td>
+                          <td className="py-1.5 px-3 text-right font-bold text-green-700 bg-green-50/50">{formatCurrency(r.totalBilling)}</td>
                         </tr>
                       ))}
                       {loggingTotals && (
                         <tr className="bg-slate-800 text-white font-semibold sticky bottom-0">
                           <td className="py-2 px-2"></td>
                           <td className="py-2 px-2">Total</td>
-                          {loggingTypes.map(t => <td key={t} className="py-2 px-2 text-right">{loggingTotals.byType[t]?.cases || 0}</td>)}
-                          <td className="py-2 px-2"></td>
-                          <td className="py-2 px-2 text-right bg-blue-600">{loggingTotals.totalCases}</td>
-                          <td className="py-2 px-2 text-right bg-green-600">{formatCurrency(loggingTotals.totalBilling)}</td>
+                          {loggingTypes.map(t => <td key={t} className="py-2 px-3 text-right">{loggingTotals.byType[t]?.cases || 0}</td>)}
+                          <td className="py-2 px-3"></td>
+                          <td className="py-2 px-3 text-right bg-blue-600">{loggingTotals.totalCases}</td>
+                          <td className="py-2 px-3 text-right bg-green-600">{formatCurrency(loggingTotals.totalBilling)}</td>
                         </tr>
                       )}
                     </>

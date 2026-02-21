@@ -97,12 +97,24 @@ router.post('/resource-request-otp', async (req, res) => {
     }
 
     // Check rate limiting (1 OTP per minute)
-    if (!Resource.canSendOTP(resource)) {
-      const waitTime = Math.ceil((60000 - (Date.now() - resource.otp_last_sent.getTime())) / 1000);
-      return res.status(429).json({ 
-        message: `Please wait ${waitTime} seconds before requesting another OTP.` 
-      });
-    }
+    // Check rate limiting
+if (!Resource.canSendOTP(resource)) {
+  const COOLDOWN_MS = 20 * 1000; // 🔥 20 seconds
+
+  const lastSent = resource.otp_last_sent?.getTime();
+  const now = Date.now();
+
+  let waitTime = 0;
+
+  if (lastSent && lastSent < now) {
+    const elapsed = now - lastSent;
+    waitTime = Math.max(0, Math.ceil((COOLDOWN_MS - elapsed) / 1000));
+  }
+console.log('Wait time:', waitTime)
+  return res.status(429).json({
+    message: `Please wait ${waitTime} seconds before requesting another OTP.`
+  });
+}
 
     // Generate OTP
     const otp = resource.generateOTP();
@@ -368,12 +380,24 @@ router.post('/resource-resend-otp', async (req, res) => {
     }
 
     // Check rate limiting
-    if (!Resource.canSendOTP(resource)) {
-      const waitTime = Math.ceil((60000 - (Date.now() - resource.otp_last_sent.getTime())) / 1000);
-      return res.status(429).json({ 
-        message: `Please wait ${waitTime} seconds before requesting another OTP.` 
-      });
-    }
+   // Check rate limiting
+if (!Resource.canSendOTP(resource)) {
+  const COOLDOWN_MS = 20 * 1000; // 🔥 20 seconds
+
+  const lastSent = resource.otp_last_sent?.getTime();
+  const now = Date.now();
+
+  let waitTime = 0;
+
+  if (lastSent && lastSent < now) {
+    const elapsed = now - lastSent;
+    waitTime = Math.max(0, Math.ceil((COOLDOWN_MS - elapsed) / 1000));
+  }
+
+  return res.status(429).json({
+    message: `Please wait ${waitTime} seconds before requesting another OTP.`
+  });
+}
 
     // Generate new OTP
     const otp = resource.generateOTP();

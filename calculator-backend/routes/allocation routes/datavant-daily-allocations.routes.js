@@ -6,6 +6,7 @@ const mongoose = require('mongoose');
 const DatavantDailyAllocation = require('../../models/Allocations/DatavantDailyAllocation');
 const DatavantAssignment = require('../../models/DailyAssignments/DatavantAssignment');
 const SubprojectRequestType = require('../../models/SubprojectRequestType');
+const Subproject = require('../../models/Subproject');
 const ActivityLog = require('../../models/ActivityLog');
 
 const { authenticateResource, authenticateUser } = require('../../middleware/auth');
@@ -43,7 +44,9 @@ const getNextSrNo = async (resourceEmail, date) => {
 
 const getBillingRate = async (subprojectId, requestType) => {
   try {
-    const rateRecord = await SubprojectRequestType.findOne({ subproject_id: subprojectId, name: requestType });
+    // Use 'Default' rate when no request_type provided (simplified Datavant model)
+    const effectiveType = requestType || 'Default';
+    const rateRecord = await SubprojectRequestType.findOne({ subproject_id: subprojectId, name: effectiveType });
     return rateRecord?.rate || 0;
   } catch (err) {
     return 0;
@@ -547,14 +550,76 @@ router.get('/admin/billing-summary', authenticateUser, async (req, res) => {
     const { month, year } = req.query;
     const targetMonth = month ? parseInt(month) : new Date().getMonth() + 1;
     const targetYear = year ? parseInt(year) : new Date().getFullYear();
-    
+
     const summary = await DatavantDailyAllocation.aggregate([
       { $match: { month: targetMonth, year: targetYear, is_deleted: { $ne: true } } },
       { $group: { _id: '$subproject_key', subproject_name: { $first: '$subproject_name' }, project_name: { $first: '$project_name' }, total_count: { $sum: '$count' }, total_entries: { $sum: 1 }, total_billing: { $sum: '$billing_amount' }, resources: { $addToSet: '$resource_email' } } },
       { $sort: { subproject_name: 1 } }
     ]);
-    
+
     res.json({ success: true, month: targetMonth, year: targetYear, data: summary });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// DATAVANT DASHBOARD - Process Type × Resource Matrix
+// ═══════════════════════════════════════════════════════════════
+
+router.get('/admin/dashboard', authenticateUser, async (req, res) => {
+  try {
+    const { month, year } = req.query;
+    const targetMonth = month ? parseInt(month) : new Date().getMonth() + 1;
+    const targetYear = year ? parseInt(year) : new Date().getFullYear();
+
+    // Aggregate: group by process_type × resource
+    const allocData = await DatavantDailyAllocation.aggregate([
+      { $match: { month: targetMonth, year: targetYear, is_deleted: { $ne: true } } },
+      {
+        $group: {
+          _id: { project_name: '$project_name', resource_email: '$resource_email' },
+          resource_name: { $first: '$resource_name' },
+          resource_email: { $first: '$resource_email' },
+          project_name: { $first: '$project_name' },
+          cases: { $sum: '$count' },
+          billing_amount: { $sum: '$billing_amount' },
+          subproject_id: { $first: '$subproject_id' }
+        }
+      },
+      { $sort: { 'resource_name': 1, 'project_name': 1 } }
+    ]);
+
+    // Get flatrates (resource payout rate) for each unique subproject
+    const subprojectIds = [...new Set(
+      allocData.map(r => r.subproject_id?.toString()).filter(Boolean)
+    )];
+    const subprojects = await Subproject.find({ _id: { $in: subprojectIds } })
+      .select('_id flatrate').lean();
+    const flatrateMap = {};
+    subprojects.forEach(s => { flatrateMap[s._id.toString()] = s.flatrate || 0; });
+
+    // Build result with payout computed
+    const data = allocData.map(r => ({
+      resource_name: r.resource_name,
+      resource_email: r.resource_email,
+      process_type: r.project_name,
+      cases: r.cases,
+      billing_amount: r.billing_amount,
+      flatrate: flatrateMap[r.subproject_id?.toString()] || 0,
+      payout: (flatrateMap[r.subproject_id?.toString()] || 0) * r.cases
+    }));
+
+    // Compute overall summary
+    const summary = {
+      total_cases: data.reduce((s, r) => s + r.cases, 0),
+      total_billing: data.reduce((s, r) => s + r.billing_amount, 0),
+      total_payout: data.reduce((s, r) => s + r.payout, 0),
+      resource_count: new Set(data.map(r => r.resource_email)).size,
+      process_types: [...new Set(data.map(r => r.process_type))]
+    };
+
+    res.json({ success: true, month: targetMonth, year: targetYear, data, summary });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

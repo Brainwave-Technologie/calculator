@@ -44,6 +44,7 @@ app.use('/api/client', require('./routes/client.routes'));
 app.use('/api/masterdb', require('./routes/masterdb.route'));
 app.use('/api/upload', require('./routes/Project Upload/bulkupload.route')); //project upload for verisma
 app.use('/api/mro-upload', require('./routes/Project Upload/upload.mro.routes')); // project upload for the MRO
+app.use('/api/datavant-upload', require('./routes/Project Upload/datavant.route')); // project upload for Datavant
 app.use('/api/allocation', require('./routes/allocation-upload.routes'));
 //MRO data handling
 // app.use('/api/mro-allocation', require('./routes/mro-allocation.routes'));

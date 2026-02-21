@@ -3,7 +3,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-const apiBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000/api';
+const apiBaseUrl = import.meta.env.VITE_BACKEND_URL  ;
 
 const PayoutTable = ({ data, isLoading }) => {
   const scrollRef = useRef(null);
@@ -34,7 +34,7 @@ const PayoutTable = ({ data, isLoading }) => {
         <thead className="sticky top-0 z-10">
           <tr className="bg-amber-100">
             <th className="sticky left-0 z-20 bg-amber-100 border border-gray-300 px-2 py-1.5 text-left font-semibold min-w-[160px]">Location</th>
-            <th className="sticky left-[160px] z-20 bg-yellow-200 border border-gray-300 px-2 py-1.5 text-center font-semibold w-14">Cost</th>
+            <th className="sticky left-[160px] z-20 bg-yellow-200 border border-gray-300 px-2 py-1.5 text-center font-semibold w-14">Payout Rate</th>
             {resources.map((name, idx) => (
               <th key={idx} className="bg-gray-100 border border-gray-300 px-1 py-1.5 text-center font-medium min-w-[60px]" title={name}>
                 {name.length > 8 ? name.substring(0, 8) + '..' : name}
@@ -131,7 +131,7 @@ const ProcessingPayoutDashboard = () => {
       <div className="bg-indigo-600 text-white px-3 py-2 flex items-center justify-between">
         <div>
           <h1 className="text-base font-semibold">Processing Payout</h1>
-          <p className="text-xs opacity-80">Payout = Cases × Flat Rate</p>
+          <p className="text-xs opacity-80">Payout = Cases × Payout Rate</p>
         </div>
         <div className="flex items-center gap-2">
           <select value={month} onChange={(e) => setMonth(parseInt(e.target.value))}

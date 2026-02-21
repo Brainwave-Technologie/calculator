@@ -38,6 +38,7 @@ const EditSubProjectModal = ({ isOpen, onClose, subProject, project, refreshProj
   const [otherProcessingRate, setOtherProcessingRate] = useState(0);
   const [processedRate, setProcessedRate] = useState(0);
   const [fileDropRate, setFileDropRate] = useState(0);
+  const [payoutRate, setPayoutRate] = useState(0);
   
   const [requestorTypeIds, setRequestorTypeIds] = useState({
     nrsNoRecords: null,
@@ -130,6 +131,7 @@ const EditSubProjectModal = ({ isOpen, onClose, subProject, project, refreshProj
       setDescription(subProject.description || "");
       setStatus(subProject.status || "active");
       setRate(subProject.rate || subProject.flatrate || 0);
+      setPayoutRate(subProject.rate || subProject.flatrate || 0);
       setGeographyId(subProject.geography_id || project?.geography_id || "");
       setClientId(subProject.client_id || project?.client_id || "");
       setProjectId(subProject.project_id || project?._id || "");
@@ -247,12 +249,11 @@ const EditSubProjectModal = ({ isOpen, onClose, subProject, project, refreshProj
         `${apiUrl}/project/subproject/${subProject._id}`,
         {
           name: name.trim(),
-          description: description.trim(),
           status,
           project_id: projectId,
           client_id: clientId,
           geography_id: geographyId,
-          rate: parseFloat(rate) || 0,
+          rate: isMROProcessing ? (parseFloat(payoutRate) || 0) : (parseFloat(rate) || 0),
         }
       );
 
@@ -537,11 +538,11 @@ const EditSubProjectModal = ({ isOpen, onClose, subProject, project, refreshProj
             </div>
           </div>
 
-          {/* ========== VERISMA: Request Type Rates ========== */}
+          {/* ========== VERISMA: Request Type Payout Rates ========== */}
           {!isMRO && (
             <div className="bg-blue-50 p-4 rounded-lg space-y-3">
               <h3 className="text-sm font-semibold text-gray-700 mb-2">
-                Request Type Rates (Verisma)
+                Payout Rate by Request Type <span className="text-xs font-normal text-gray-400">(optional)</span>
               </h3>
               
               <div className="grid grid-cols-3 gap-4">
@@ -684,20 +685,37 @@ const EditSubProjectModal = ({ isOpen, onClose, subProject, project, refreshProj
                     className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-gray-500 disabled:opacity-70"
                   />
                 </div>
+
+                <div className="col-span-2">
+                  <label className="block text-sm font-medium text-purple-700 mb-1">
+                    Payout Rate ($)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={payoutRate}
+                    onChange={(e) => setPayoutRate(e.target.value)}
+                    placeholder="0.00"
+                    disabled={loading}
+                    className="w-full border border-purple-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-purple-500 disabled:opacity-70"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Payout rate per case paid to resource</p>
+                </div>
               </div>
             </div>
           )}
 
-          {/* ========== MRO Logging/Payer: Rate ========== */}
+          {/* ========== MRO Logging/Payer: Billing Rate ========== */}
           {isMROLoggingOrPayer && (
             <div className="bg-emerald-50 p-4 rounded-lg space-y-3">
               <h3 className="text-sm font-semibold text-gray-700 mb-2">
-                Rate (MRO {projectName})
+                Billing Rate (MRO {projectName})
               </h3>
-              
+
               <div>
                 <label className="block text-sm font-medium text-emerald-700 mb-1">
-                  Rate per Case ($)
+                  Billing Rate ($)
                 </label>
                 <input
                   type="number"
@@ -710,19 +728,19 @@ const EditSubProjectModal = ({ isOpen, onClose, subProject, project, refreshProj
                   className="w-full border border-emerald-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500 disabled:opacity-70"
                 />
                 <p className="text-xs text-gray-500 mt-1">
-                  {projectName?.toLowerCase() === 'logging' 
-                    ? "Flat rate per case for logging work" 
-                    : "Flat rate per case for payer project"}
+                  {projectName?.toLowerCase() === 'logging'
+                    ? "Billing rate per case for logging work"
+                    : "Billing rate per case for payer project"}
                 </p>
               </div>
             </div>
           )}
 
-          {/* Verisma Flat Rate */}
+          {/* Verisma Payout Rate */}
           {!isMRO && (
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Flat Rate ($)
+                Payout Rate ($)
               </label>
               <input
                 type="number"
@@ -735,25 +753,10 @@ const EditSubProjectModal = ({ isOpen, onClose, subProject, project, refreshProj
                 className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-blue-500 disabled:opacity-70"
               />
               <p className="text-xs text-gray-500 mt-1">
-                Optional: Additional fixed rate for this location
+                Optional: Payout rate for this location
               </p>
             </div>
           )}
-
-          {/* Description */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Description
-            </label>
-            <textarea
-              rows="3"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="(Optional) Brief description about this location"
-              disabled={loading}
-              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-blue-500 disabled:opacity-70"
-            />
-          </div>
 
           {/* Summary */}
           <div className={`p-3 rounded-lg ${isMRO ? 'bg-green-100' : 'bg-gray-100'}`}>
@@ -766,19 +769,21 @@ const EditSubProjectModal = ({ isOpen, onClose, subProject, project, refreshProj
                   parseFloat(duplicateRate || 0)
                 ).toFixed(2)}
                 {parseFloat(rate || 0) > 0 && (
-                  <span> | <strong>Flat Rate:</strong> ${parseFloat(rate || 0).toFixed(2)}</span>
+                  <span> | <strong>Payout Rate:</strong> ${parseFloat(rate || 0).toFixed(2)}</span>
                 )}
               </p>
             )}
             {isMROProcessing && (
               <p className="text-xs text-green-700">
-                <strong>Billing Rates:</strong> NRS-NO Records: ${parseFloat(nrsNoRecordsRate || 0).toFixed(2)} | 
-                Manual: ${parseFloat(manualRate || 0).toFixed(2)}
+                <strong>Billing Rates:</strong> NRS-NO Records: ${parseFloat(nrsNoRecordsRate || 0).toFixed(2)} | Manual: ${parseFloat(manualRate || 0).toFixed(2)}
+                {parseFloat(payoutRate || 0) > 0 && (
+                  <span> | <strong>Payout Rate:</strong> ${parseFloat(payoutRate || 0).toFixed(2)}</span>
+                )}
               </p>
             )}
             {isMROLoggingOrPayer && (
               <p className="text-xs text-emerald-700">
-                <strong>Rate per Case:</strong> ${parseFloat(rate || 0).toFixed(2)}
+                <strong>Billing Rate:</strong> ${parseFloat(rate || 0).toFixed(2)}
               </p>
             )}
           </div>
