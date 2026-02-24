@@ -32,7 +32,7 @@ import AdminResourceCases from "./pages/admin/AdminResourceCases";
 // ═══════════════════════════════════════════════════════════════
 // NEW UNIFIED DASHBOARDS - Single page with client navigation
 // ═══════════════════════════════════════════════════════════════
-import PayrollDashboard from "./pages/payout/PayrollDashboard";       // Unified: Verisma/MRO/Datavant
+import PayrollDashboard from "./pages/payout/Payrolldashboard";       // Unified: Verisma/MRO/Datavant
 import CostingDashboard from "./pages/Costing";              // Unified: Verisma/MRO/Datavant
 import ProcessingPayoutDashboard from "./pages/payout/processingpayout/ProcessingPayoutDashboard";
 import ResourcePayoutCalculator from './pages/payout/ResourcePayoutCalculator';

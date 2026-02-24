@@ -127,6 +127,11 @@ const VerismaDailyAllocationSchema = new mongoose.Schema({
   billing_amount: { type: Number, default: 0 },
   billing_rate_at_logging: { type: Number, default: 0 },
   is_billable: { type: Boolean, default: true },
+
+  // ============ PAYOUT RATE ============
+  // Stores the subproject flatrate at logging time for payout calculations
+  // Used as fallback if the subproject is later removed from the database
+  payout_rate: { type: Number, default: 0 },
   
   // ============ STATUS & LOCKING ============
   status: {

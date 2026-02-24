@@ -46,6 +46,8 @@ const VerismaDashboard = () => {
   const [detailedSearch, setDetailedSearch] = useState('');
   const [detailedPage, setDetailedPage] = useState(1);
   const detailedLimit = 25;
+  const [detailedStartDate, setDetailedStartDate] = useState('');
+  const [detailedEndDate, setDetailedEndDate] = useState('');
   
   const [isLoading, setIsLoading] = useState(false);
   const [sortConfig, setSortConfig] = useState({ key: 'location', direction: 'asc' });
@@ -254,7 +256,7 @@ const VerismaDashboard = () => {
     const locationMap = new Map();
     
     filtered.forEach(alloc => {
-      const key = `${alloc.subproject_id || alloc.subproject_name}-${alloc.project_id || alloc.project_name}`;
+      const key = `${(alloc.subproject_name || 'Unknown').toLowerCase()}-${(alloc.project_name || 'Unknown').toLowerCase()}`;
       
       if (!locationMap.has(key)) {
         locationMap.set(key, {
@@ -354,16 +356,62 @@ const VerismaDashboard = () => {
     });
   }, [summaryData, sortConfig]);
 
-  // Filtered detailed entries
+  // Filtered and grouped detailed entries
   const filteredDetailed = useMemo(() => {
-    if (!detailedSearch) return allocations;
-    const s = detailedSearch.toLowerCase();
-    return allocations.filter(a => 
-      a.resource_name?.toLowerCase().includes(s) || 
-      a.subproject_name?.toLowerCase().includes(s) ||
-      a.request_type?.toLowerCase().includes(s)
+    let filtered = allocations;
+
+    // Date filter
+    if (detailedStartDate) {
+      const start = new Date(detailedStartDate);
+      start.setHours(0, 0, 0, 0);
+      filtered = filtered.filter(a => {
+        const d = new Date(a.allocation_date);
+        return d >= start;
+      });
+    }
+    if (detailedEndDate) {
+      const end = new Date(detailedEndDate);
+      end.setHours(23, 59, 59, 999);
+      filtered = filtered.filter(a => {
+        const d = new Date(a.allocation_date);
+        return d <= end;
+      });
+    }
+
+    // Search filter
+    if (detailedSearch) {
+      const s = detailedSearch.toLowerCase();
+      filtered = filtered.filter(a =>
+        a.resource_name?.toLowerCase().includes(s) ||
+        a.subproject_name?.toLowerCase().includes(s) ||
+        a.request_type?.toLowerCase().includes(s)
+      );
+    }
+
+    // Group by date + resource + location + request_type
+    const groupMap = new Map();
+    filtered.forEach(a => {
+      const dateKey = a.allocation_date ? new Date(a.allocation_date).toISOString().split('T')[0] : 'unknown';
+      const key = `${dateKey}|${a.resource_name || ''}|${a.subproject_name || ''}|${a.request_type || ''}`;
+      if (!groupMap.has(key)) {
+        groupMap.set(key, {
+          allocation_date: a.allocation_date,
+          resource_name: a.resource_name,
+          subproject_name: a.subproject_name,
+          request_type: a.request_type,
+          project_name: a.project_name || 'Unknown',
+          count: 0
+        });
+      }
+      const group = groupMap.get(key);
+      group.count += parseInt(a.count) || 1;
+    });
+
+    // Sort by date descending
+    return Array.from(groupMap.values()).sort((a, b) =>
+      new Date(b.allocation_date) - new Date(a.allocation_date)
     );
-  }, [allocations, detailedSearch]);
+  }, [allocations, detailedSearch, detailedStartDate, detailedEndDate]);
 
   // Paginated detailed entries
   const paginatedDetailed = useMemo(() => {
@@ -596,10 +644,22 @@ const VerismaDashboard = () => {
           <div className="px-3 py-2 border-b bg-gray-50 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <button onClick={() => setShowDetailed(!showDetailed)} className="text-gray-500 hover:text-gray-700">{showDetailed ? '▼' : '▶'}</button>
-              <span className="text-xs font-semibold text-gray-700">📋 Detailed Entries • {formatNumber(filteredDetailed.length)} records</span>
+              <span className="text-xs font-semibold text-gray-700">Detailed Entries • {formatNumber(filteredDetailed.length)} records</span>
             </div>
-            <input type="text" placeholder="Search entries..." value={detailedSearch} onChange={(e) => { setDetailedSearch(e.target.value); setDetailedPage(1); }}
-              className="px-2 py-1 text-xs border rounded w-36" />
+            <div className="flex items-center gap-2">
+              <label className="text-[10px] text-gray-500">From:</label>
+              <input type="date" value={detailedStartDate} onChange={(e) => { setDetailedStartDate(e.target.value); setDetailedPage(1); }}
+                className="px-1.5 py-1 text-xs border rounded" />
+              <label className="text-[10px] text-gray-500">To:</label>
+              <input type="date" value={detailedEndDate} onChange={(e) => { setDetailedEndDate(e.target.value); setDetailedPage(1); }}
+                className="px-1.5 py-1 text-xs border rounded" />
+              {(detailedStartDate || detailedEndDate) && (
+                <button onClick={() => { setDetailedStartDate(''); setDetailedEndDate(''); setDetailedPage(1); }}
+                  className="px-1.5 py-1 text-[10px] bg-red-100 text-red-600 rounded hover:bg-red-200">Clear</button>
+              )}
+              <input type="text" placeholder="Search entries..." value={detailedSearch} onChange={(e) => { setDetailedSearch(e.target.value); setDetailedPage(1); }}
+                className="px-2 py-1 text-xs border rounded w-36" />
+            </div>
           </div>
 
           {showDetailed && (
@@ -611,27 +671,23 @@ const VerismaDashboard = () => {
                       <th className="py-2 px-2 text-left font-semibold border-b">Date</th>
                       <th className="py-2 px-2 text-left font-semibold border-b">Resource</th>
                       <th className="py-2 px-2 text-left font-semibold border-b">Location</th>
+                      <th className="py-2 px-2 text-left font-semibold border-b">Process Type</th>
                       <th className="py-2 px-2 text-left font-semibold border-b">Type</th>
                       <th className="py-2 px-2 text-right font-semibold border-b">Count</th>
-                      <th className="py-2 px-2 text-right font-semibold border-b">Rate</th>
-                      <th className="py-2 px-2 text-right font-semibold border-b bg-green-50">Amount</th>
-                      <th className="py-2 px-2 text-left font-semibold border-b">Remark</th>
                     </tr>
                   </thead>
                   <tbody>
                     {paginatedDetailed.length === 0 ? (
-                      <tr><td colSpan={8} className="py-6 text-center text-gray-500">No entries</td></tr>
+                      <tr><td colSpan={6} className="py-6 text-center text-gray-500">No entries</td></tr>
                     ) : (
                       paginatedDetailed.map((a, i) => (
-                        <tr key={a._id || i} className="border-b border-slate-100 hover:bg-slate-50">
+                        <tr key={`${a.allocation_date}-${a.resource_name}-${a.subproject_name}-${a.request_type}-${i}`} className="border-b border-slate-100 hover:bg-slate-50">
                           <td className="py-1.5 px-2 text-slate-600">{formatDate(a.allocation_date)}</td>
                           <td className="py-1.5 px-2 font-medium text-slate-800">{a.resource_name}</td>
                           <td className="py-1.5 px-2 text-slate-700 max-w-[120px] truncate" title={a.subproject_name}>{a.subproject_name}</td>
+                          <td className="py-1.5 px-2 text-slate-600">{a.project_name}</td>
                           <td className="py-1.5 px-2"><RequestTypeBadge type={a.request_type} /></td>
-                          <td className="py-1.5 px-2 text-right font-medium text-slate-800">{a.count || 1}</td>
-                          <td className="py-1.5 px-2 text-right text-slate-600">{formatCurrency(a.billing_rate)}</td>
-                          <td className="py-1.5 px-2 text-right font-semibold text-green-700 bg-green-50/50">{formatCurrency(a.billing_amount)}</td>
-                          <td className="py-1.5 px-2 text-slate-500 max-w-[100px] truncate" title={a.remark}>{a.remark || '—'}</td>
+                          <td className="py-1.5 px-2 text-right font-medium text-slate-800">{a.count}</td>
                         </tr>
                       ))
                     )}

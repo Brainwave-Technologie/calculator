@@ -151,14 +151,11 @@ const ResourceLogin = () => {
     setSuccess('');
 
     try {
-      const response = await axios.post(`${API_URL}/auth/resource-resend-otp`, { email });
+      await axios.post(`${API_URL}/auth/resource-resend-otp`, { email });
       setSuccess('New OTP sent to your email');
       setCountdown(60);
       setOtp(['', '', '', '', '', '']);
-      
-      if (response.data.dev_otp) {
-        setDevOtp(response.data.dev_otp);
-      }
+      setDevOtp('');
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to resend OTP');
     } finally {

@@ -15,6 +15,7 @@ const Project = require("../../models/Project");
 const Subproject = require("../../models/Subproject");
 const SubprojectRequestType = require("../../models/SubprojectRequestType");
 const Billing = require("../../models/Billing");
+const Resource = require("../../models/Resource");
 const upload = multer({ dest: "uploads/" });
 
 // Helper to clean strings
@@ -27,6 +28,11 @@ function normalizeName(name) {
     .replace(/[_-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+// Helper to escape regex special characters
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // All 3 request types for Verisma
@@ -69,8 +75,9 @@ router.post("/verisma-bulk-upload", upload.single("file"), async (req, res) => {
               if (cleanHeader.includes("process type")) return "project_name";
               if (cleanHeader.includes("location")) return "subproject_name";
               if (cleanHeader.includes("request type")) return "request_type";
-              if (cleanHeader.includes("costing rate") || cleanHeader === "rate" || cleanHeader === "payout rate" || cleanHeader === "payout_rate") return "rate";
-              if (cleanHeader.includes("flat rate")) return "flatrate";
+              if (cleanHeader.includes("request rate") || cleanHeader === "request_rate") return "rate";
+              if (cleanHeader.includes("costing rate") || cleanHeader === "rate") return "rate";
+              if (cleanHeader.includes("payout rate") || cleanHeader === "payout_rate" || cleanHeader.includes("flat rate")) return "flatrate";
               return header;
             },
           })
@@ -226,12 +233,14 @@ router.post("/verisma-bulk-upload", upload.single("file"), async (req, res) => {
 
     const processedBusinessKeys = [];
 
+    const processedSubprojectIds = []; // Track for assignment sync
+
     for (const [geoKey, geoData] of geographyMap) {
       // UPSERT Geography (shared across all clients, don't delete)
-      let geography = await Geography.findOne({ 
-        name: { $regex: new RegExp(`^${geoData.name}$`, 'i') }
+      let geography = await Geography.findOne({
+        name: { $regex: new RegExp(`^${escapeRegex(geoData.name)}$`, 'i') }
       });
-      
+
       if (!geography) {
         geography = await Geography.create({
           name: geoData.name,
@@ -249,7 +258,7 @@ router.post("/verisma-bulk-upload", upload.single("file"), async (req, res) => {
         // UPSERT Client (only this client from CSV, doesn't touch MRO if not in CSV)
         let client = await Client.findOne({
           geography_id: geography._id,
-          name: { $regex: new RegExp(`^${clientData.name}$`, 'i') }
+          name: { $regex: new RegExp(`^${escapeRegex(clientData.name)}$`, 'i') }
         });
 
         if (!client) {
@@ -271,7 +280,7 @@ router.post("/verisma-bulk-upload", upload.single("file"), async (req, res) => {
           // UPSERT Project (under this client only)
           let project = await Project.findOne({
             client_id: client._id,
-            name: { $regex: new RegExp(`^${projData.name}$`, 'i') }
+            name: { $regex: new RegExp(`^${escapeRegex(projData.name)}$`, 'i') }
           });
 
           if (!project) {
@@ -298,11 +307,11 @@ router.post("/verisma-bulk-upload", upload.single("file"), async (req, res) => {
 
             // UPSERT Subproject
             let subproject = await Subproject.findOne({ business_key: businessKey });
-            
+
             if (!subproject) {
               subproject = await Subproject.findOne({
                 project_id: project._id,
-                name: { $regex: new RegExp(`^${subData.name}$`, 'i') }
+                name: { $regex: new RegExp(`^${escapeRegex(subData.name)}$`, 'i') }
               });
             }
 
@@ -334,6 +343,19 @@ router.post("/verisma-bulk-upload", upload.single("file"), async (req, res) => {
               });
               stats.subprojects.created++;
             }
+
+            // Track for assignment sync
+            processedSubprojectIds.push({
+              subproject_id: subproject._id,
+              subproject_name: subproject.name,
+              subproject_key: businessKey,
+              geography_id: geography._id,
+              geography_name: geography.name,
+              client_id: client._id,
+              client_name: client.name,
+              project_id: project._id,
+              project_name: project.name
+            });
 
             // UPSERT Request Types with rates from CSV
             for (const reqType of ALL_REQUEST_TYPES) {
@@ -367,6 +389,50 @@ router.post("/verisma-bulk-upload", upload.single("file"), async (req, res) => {
       }
     }
 
+    // =============================================
+    // 5. SYNC RESOURCE ASSIGNMENTS
+    // Update any resource assignments that reference these subprojects
+    // so that denormalized names/IDs stay consistent
+    // =============================================
+    let assignmentsSynced = 0;
+    try {
+      const subIdList = processedSubprojectIds.map(s => s.subproject_id);
+      const affectedResources = await Resource.find({
+        'assignments.subprojects.subproject_id': { $in: subIdList }
+      });
+
+      for (const resource of affectedResources) {
+        let changed = false;
+        for (const assignment of resource.assignments) {
+          for (const sp of assignment.subprojects) {
+            const match = processedSubprojectIds.find(
+              p => p.subproject_id.toString() === sp.subproject_id?.toString()
+            );
+            if (match) {
+              // Sync subproject-level fields
+              sp.subproject_name = match.subproject_name;
+              sp.subproject_key = match.subproject_key;
+              // Sync assignment-level fields (geography, client, project)
+              assignment.geography_id = match.geography_id;
+              assignment.geography_name = match.geography_name;
+              assignment.client_id = match.client_id;
+              assignment.client_name = match.client_name;
+              assignment.project_id = match.project_id;
+              assignment.project_name = match.project_name;
+              changed = true;
+            }
+          }
+        }
+        if (changed) {
+          await resource.save();
+          assignmentsSynced++;
+        }
+      }
+      console.log(`🔄 Synced assignments for ${assignmentsSynced} resources`);
+    } catch (syncErr) {
+      console.error("Assignment sync warning:", syncErr.message);
+    }
+
     // Cleanup
     fs.unlinkSync(filePath);
 
@@ -381,6 +447,7 @@ router.post("/verisma-bulk-upload", upload.single("file"), async (req, res) => {
         projects: stats.projects,
         subprojects: stats.subprojects,
         requestTypes: stats.requestTypes,
+        assignmentsSynced,
         note: "Only clients in CSV affected. MRO and other clients NOT in CSV are preserved."
       },
       rowsProcessed: validRows.length,
@@ -419,8 +486,9 @@ router.post("/verisma-bulk-upload-replace", upload.single("file"), async (req, r
               if (cleanHeader.includes("process type")) return "project_name";
               if (cleanHeader.includes("location")) return "subproject_name";
               if (cleanHeader.includes("request type")) return "request_type";
-              if (cleanHeader.includes("costing rate") || cleanHeader === "rate" || cleanHeader === "payout rate" || cleanHeader === "payout_rate") return "rate";
-              if (cleanHeader.includes("flat rate")) return "flatrate";
+              if (cleanHeader.includes("request rate") || cleanHeader === "request_rate") return "rate";
+              if (cleanHeader.includes("costing rate") || cleanHeader === "rate") return "rate";
+              if (cleanHeader.includes("payout rate") || cleanHeader === "payout_rate" || cleanHeader.includes("flat rate")) return "flatrate";
               return header;
             },
           })
@@ -569,13 +637,14 @@ router.post("/verisma-bulk-upload-replace", upload.single("file"), async (req, r
     };
 
     const processedBusinessKeys = [];
-    const processedClientNames = new Set(); // Track which clients are in the CSV
+    const processedProjectIds = new Set(); // Track which projects are in the CSV
+    const processedSubprojectIds = []; // Track for assignment sync
 
     for (const [geoKey, geoData] of geographyMap) {
-      let geography = await Geography.findOne({ 
-        name: { $regex: new RegExp(`^${geoData.name}$`, 'i') }
+      let geography = await Geography.findOne({
+        name: { $regex: new RegExp(`^${escapeRegex(geoData.name)}$`, 'i') }
       });
-      
+
       if (!geography) {
         geography = await Geography.create({
           name: geoData.name,
@@ -588,12 +657,9 @@ router.post("/verisma-bulk-upload-replace", upload.single("file"), async (req, r
       }
 
       for (const [clientKey, clientData] of geoData.clients) {
-        // Track which clients are in this CSV
-        processedClientNames.add(clientData.name.toLowerCase().trim());
-        
         let client = await Client.findOne({
           geography_id: geography._id,
-          name: { $regex: new RegExp(`^${clientData.name}$`, 'i') }
+          name: { $regex: new RegExp(`^${escapeRegex(clientData.name)}$`, 'i') }
         });
 
         if (!client) {
@@ -612,7 +678,7 @@ router.post("/verisma-bulk-upload-replace", upload.single("file"), async (req, r
         for (const [projKey, projData] of clientData.projects) {
           let project = await Project.findOne({
             client_id: client._id,
-            name: { $regex: new RegExp(`^${projData.name}$`, 'i') }
+            name: { $regex: new RegExp(`^${escapeRegex(projData.name)}$`, 'i') }
           });
 
           if (!project) {
@@ -631,16 +697,19 @@ router.post("/verisma-bulk-upload-replace", upload.single("file"), async (req, r
             stats.projects.existing++;
           }
 
+          // Track which projects (process types) are in the CSV
+          processedProjectIds.add(project._id.toString());
+
           for (const [subKey, subData] of projData.subprojects) {
             const businessKey = generateBusinessKey(client.name, project.name, subData.name);
             processedBusinessKeys.push(businessKey);
 
             let subproject = await Subproject.findOne({ business_key: businessKey });
-            
+
             if (!subproject) {
               subproject = await Subproject.findOne({
                 project_id: project._id,
-                name: { $regex: new RegExp(`^${subData.name}$`, 'i') }
+                name: { $regex: new RegExp(`^${escapeRegex(subData.name)}$`, 'i') }
               });
             }
 
@@ -671,10 +740,23 @@ router.post("/verisma-bulk-upload-replace", upload.single("file"), async (req, r
               stats.subprojects.created++;
             }
 
+            // Track for assignment sync
+            processedSubprojectIds.push({
+              subproject_id: subproject._id,
+              subproject_name: subproject.name,
+              subproject_key: businessKey,
+              geography_id: geography._id,
+              geography_name: geography.name,
+              client_id: client._id,
+              client_name: client.name,
+              project_id: project._id,
+              project_name: project.name
+            });
+
             // Request Types with rates
             for (const reqType of ALL_REQUEST_TYPES) {
               const rate = subData.rates.get(reqType) || 0;
-              
+
               const existingReqType = await SubprojectRequestType.findOne({
                 subproject_id: subproject._id,
                 name: reqType
@@ -702,17 +784,15 @@ router.post("/verisma-bulk-upload-replace", upload.single("file"), async (req, r
     }
 
     // 5. SOFT DELETE subprojects not in upload
-    // CRITICAL: Only affect clients that were IN THE CSV, NOT MRO or others!
-    const clientNamesArray = Array.from(processedClientNames);
-    console.log(`[REPLACE] Clients in CSV: ${clientNamesArray.join(', ')}`);
-    
-    // Build regex array for client names
-    const clientRegexArray = clientNamesArray.map(name => new RegExp(`^${name}$`, 'i'));
-    
+    // CRITICAL: Only affect subprojects under projects (process types) that were IN THE CSV
+    // This ensures uploading Processing data does NOT soft-delete Indexing locations
+    const projectIdsArray = Array.from(processedProjectIds).map(id => new mongoose.Types.ObjectId(id));
+    console.log(`[REPLACE] Projects in CSV: ${projectIdsArray.length} project(s)`);
+
     const deactivateResult = await Subproject.updateMany(
       {
+        project_id: { $in: projectIdsArray },  // Only under projects in CSV
         business_key: { $nin: processedBusinessKeys },
-        client_name: { $in: clientRegexArray },  // ONLY clients in CSV!
         status: 'active'
       },
       {
@@ -726,6 +806,46 @@ router.post("/verisma-bulk-upload-replace", upload.single("file"), async (req, r
 
     console.log(`[REPLACE] Soft-deleted ${stats.subprojects.deactivated} subprojects not in upload`);
 
+    // =============================================
+    // 6. SYNC RESOURCE ASSIGNMENTS
+    // =============================================
+    let assignmentsSynced = 0;
+    try {
+      const subIdList = processedSubprojectIds.map(s => s.subproject_id);
+      const affectedResources = await Resource.find({
+        'assignments.subprojects.subproject_id': { $in: subIdList }
+      });
+
+      for (const resource of affectedResources) {
+        let changed = false;
+        for (const assignment of resource.assignments) {
+          for (const sp of assignment.subprojects) {
+            const match = processedSubprojectIds.find(
+              p => p.subproject_id.toString() === sp.subproject_id?.toString()
+            );
+            if (match) {
+              sp.subproject_name = match.subproject_name;
+              sp.subproject_key = match.subproject_key;
+              assignment.geography_id = match.geography_id;
+              assignment.geography_name = match.geography_name;
+              assignment.client_id = match.client_id;
+              assignment.client_name = match.client_name;
+              assignment.project_id = match.project_id;
+              assignment.project_name = match.project_name;
+              changed = true;
+            }
+          }
+        }
+        if (changed) {
+          await resource.save();
+          assignmentsSynced++;
+        }
+      }
+      console.log(`🔄 Synced assignments for ${assignmentsSynced} resources`);
+    } catch (syncErr) {
+      console.error("Assignment sync warning:", syncErr.message);
+    }
+
     fs.unlinkSync(filePath);
 
     return res.json({
@@ -737,8 +857,8 @@ router.post("/verisma-bulk-upload-replace", upload.single("file"), async (req, r
         projects: stats.projects,
         subprojects: stats.subprojects,
         requestTypes: stats.requestTypes,
-        affectedClients: clientNamesArray,
-        note: "Only clients in CSV affected. MRO and clients NOT in CSV are preserved."
+        assignmentsSynced,
+        note: "Only projects (process types) in CSV affected. Other projects are preserved."
       },
       rowsProcessed: validRows.length,
     });
@@ -774,5 +894,100 @@ function sendErrorCsv(res, filePath, errors) {
     return res.status(500).json({ error: "Error generating error report" });
   }
 }
+
+// =============================================
+// VERISMA EXPORT - Download all Verisma project data as CSV
+// =============================================
+router.get("/verisma-export", async (req, res) => {
+  try {
+    // Find all Verisma clients (case-insensitive)
+    const verismaClients = await Client.find({
+      name: { $regex: /^verisma$/i }
+    }).lean();
+
+    if (verismaClients.length === 0) {
+      return res.status(404).json({ error: "No Verisma client found" });
+    }
+
+    const clientIds = verismaClients.map(c => c._id);
+
+    // Find ALL projects under Verisma clients
+    const projects = await Project.find({
+      client_id: { $in: clientIds }
+    }).lean();
+
+    if (projects.length === 0) {
+      return res.status(404).json({ error: "No Verisma projects found" });
+    }
+
+    const projectIds = projects.map(p => p._id);
+
+    // Get ALL active subprojects under those projects (query by project_id, not client_id)
+    const subprojects = await Subproject.find({
+      project_id: { $in: projectIds },
+      status: 'active'
+    }).lean();
+
+    if (subprojects.length === 0) {
+      return res.status(404).json({ error: "No active Verisma locations found" });
+    }
+
+    // Build project lookup for names
+    const projectMap = {};
+    projects.forEach(p => { projectMap[p._id.toString()] = p; });
+
+    // Build client lookup for names
+    const clientMap = {};
+    verismaClients.forEach(c => { clientMap[c._id.toString()] = c; });
+
+    const subprojectIds = subprojects.map(sp => sp._id);
+
+    // Get all request types for these subprojects
+    const requestTypes = await SubprojectRequestType.find({
+      subproject_id: { $in: subprojectIds }
+    }).lean();
+
+    // Build a lookup: subproject_id -> { requestTypeName: rate }
+    const rateMap = {};
+    requestTypes.forEach(rt => {
+      const spId = rt.subproject_id.toString();
+      if (!rateMap[spId]) rateMap[spId] = {};
+      rateMap[spId][rt.name] = rt.rate || 0;
+    });
+
+    // Build CSV rows - one row per subproject per request type
+    const csvRows = [];
+    for (const sp of subprojects) {
+      const spId = sp._id.toString();
+      const rates = rateMap[spId] || {};
+      const proj = projectMap[sp.project_id?.toString()] || {};
+      const cli = clientMap[sp.client_id?.toString()] || {};
+
+      for (const reqType of ALL_REQUEST_TYPES) {
+        csvRows.push({
+          geography: sp.geography_name || '',
+          client: sp.client_name || cli.name || '',
+          'process type': sp.project_name || proj.name || '',
+          location: sp.name || '',
+          'request type': reqType,
+          'request rate': rates[reqType] || 0,
+          'payout rate': sp.flatrate || 0
+        });
+      }
+    }
+
+    const parser = new Parser({
+      fields: ['geography', 'client', 'process type', 'location', 'request type', 'request rate', 'payout rate']
+    });
+    const csvOut = parser.parse(csvRows);
+
+    res.setHeader("Content-Disposition", "attachment; filename=verisma-project-export.csv");
+    res.setHeader("Content-Type", "text/csv");
+    return res.send(csvOut);
+  } catch (err) {
+    console.error("Verisma export error:", err);
+    return res.status(500).json({ error: "Failed to export Verisma data: " + err.message });
+  }
+});
 
 module.exports = router;

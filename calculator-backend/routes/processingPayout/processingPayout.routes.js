@@ -11,7 +11,6 @@ const ExcelJS = require('exceljs');
 const VerismaDailyAllocation = require('../../models/Allocations/Verismadailyallocation');
 const MRODailyAllocation = require('../../models/Allocations/MROdailyallocation');
 const Subproject = require('../../models/Subproject');
-const Project = require('../../models/Project');
 // routes/processingPayout.routes.js
 // FIXED: Properly fetches flatrate from Subproject model
 // Get Verisma Processing Payout
@@ -19,35 +18,33 @@ async function getVerismaProcessingPayout(month, year) {
   const startDate = new Date(year, month - 1, 1);
   const endDate = new Date(year, month, 0, 23, 59, 59, 999);
 
-  // Step 1: Get ALL subprojects with flatrate FIRST
+  // Step 1: Build subproject lookup maps (by ID and by name) for flatrate
   const allSubprojects = await Subproject.find({}).select('_id name flatrate project_id').lean();
-  
-  // Create a lookup map for subproject flatrates
-  const subprojectFlatrateMap = {};
+
+  // Map by ID for direct lookup
+  const subprojectByIdMap = {};
+  // Map by lowercase name for fallback lookup when ID doesn't match
+  const subprojectByNameMap = {};
   allSubprojects.forEach(sp => {
-    subprojectFlatrateMap[sp._id.toString()] = {
+    subprojectByIdMap[sp._id.toString()] = {
       name: sp.name,
       flatrate: sp.flatrate || 0
     };
+    // Use lowercase name as key for name-based matching
+    const nameKey = (sp.name || '').toLowerCase().trim();
+    if (nameKey) {
+      subprojectByNameMap[nameKey] = {
+        name: sp.name,
+        flatrate: sp.flatrate || 0
+      };
+    }
   });
 
-  // Step 2: Get Processing projects
-  const processingProjects = await Project.find({
-    name: { $regex: /processing/i, $not: { $regex: /logging|indexing|intake/i } }
-  }).select('_id').lean();
-  
-  const processingProjectIds = processingProjects.map(p => p._id.toString());
-
-  // Step 3: Get Processing subprojects
-  const processingSubprojectIds = allSubprojects
-    .filter(sp => processingProjectIds.includes(sp.project_id?.toString()))
-    .map(sp => sp._id);
-
-  // Step 4: Get allocations
+  // Step 2: Get allocations - filter directly by process field (like MRO does with process_type)
   const allocations = await VerismaDailyAllocation.find({
     allocation_date: { $gte: startDate, $lte: endDate },
     is_deleted: { $ne: true },
-    subproject_id: { $in: processingSubprojectIds }
+    process: { $regex: /^processing$/i }
   }).lean();
 
   const uniqueResources = [...new Set(allocations.map(a => a.resource_name).filter(Boolean))].sort();
@@ -55,18 +52,32 @@ async function getVerismaProcessingPayout(month, year) {
 
   allocations.forEach(alloc => {
     const spId = alloc.subproject_id?.toString();
-    if (!spId) return;
-
-    // Get flatrate from our pre-fetched map
-    const subprojectData = subprojectFlatrateMap[spId];
-    const flatrate = subprojectData?.flatrate || 0;
-    const locationName = alloc.subproject_name || subprojectData?.name || 'Unknown';
+    const locationName = alloc.subproject_name || 'Unknown';
     const resourceName = alloc.resource_name;
     const caseCount = alloc.count || 1;
 
-    if (!locationMap[spId]) {
-      locationMap[spId] = {
-        location_id: spId,
+    // Determine flatrate with priority:
+    // 1. Try subproject by ID (most accurate, gets updated rate)
+    // 2. Try subproject by name (fallback if ID doesn't match, still gets updated rate)
+    // 3. Use payout_rate saved on allocation (fallback if subproject was removed)
+    let flatrate = 0;
+    const subprojectById = spId ? subprojectByIdMap[spId] : null;
+    const subprojectByName = subprojectByNameMap[(locationName || '').toLowerCase().trim()];
+
+    if (subprojectById && subprojectById.flatrate > 0) {
+      flatrate = subprojectById.flatrate;
+    } else if (subprojectByName && subprojectByName.flatrate > 0) {
+      flatrate = subprojectByName.flatrate;
+    } else if (alloc.payout_rate > 0) {
+      flatrate = alloc.payout_rate;
+    }
+
+    // Group by location name (not by subproject_id) to handle ID mismatches
+    const locationKey = locationName.toLowerCase().trim();
+
+    if (!locationMap[locationKey]) {
+      locationMap[locationKey] = {
+        location_id: spId || locationKey,
         location_name: locationName,
         flatrate: flatrate,
         resource_cases: {},
@@ -75,11 +86,16 @@ async function getVerismaProcessingPayout(month, year) {
       };
     }
 
-    if (!locationMap[spId].resource_cases[resourceName]) {
-      locationMap[spId].resource_cases[resourceName] = 0;
+    // Update flatrate if a better (non-zero) rate is found from a later allocation
+    if (flatrate > 0 && locationMap[locationKey].flatrate === 0) {
+      locationMap[locationKey].flatrate = flatrate;
     }
-    locationMap[spId].resource_cases[resourceName] += caseCount;
-    locationMap[spId].total_cases += caseCount;
+
+    if (!locationMap[locationKey].resource_cases[resourceName]) {
+      locationMap[locationKey].resource_cases[resourceName] = 0;
+    }
+    locationMap[locationKey].resource_cases[resourceName] += caseCount;
+    locationMap[locationKey].total_cases += caseCount;
   });
 
   // Calculate payouts

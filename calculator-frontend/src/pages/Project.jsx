@@ -650,7 +650,7 @@ const handleDeleteGeography = (geography, e) => {
                   <th className="px-4 py-2 text-right font-semibold text-green-600">Payout Rate</th>
                 </>
               ) : (
-                /* Verisma Other Projects - Show Request Types only (no Rate) */
+                /* Verisma Other Projects - Show Request Types only (no Payout Rate) */
                 <>
                   <th className="px-4 py-2 text-right font-semibold text-blue-600">New Request</th>
                   <th className="px-4 py-2 text-right font-semibold text-purple-600">Key</th>
@@ -860,7 +860,7 @@ const handleDeleteGeography = (geography, e) => {
       />
 
       {/* Action Buttons */}
-      <div className="p-8 flex flex-col gap-4">
+      <div className="px-6 pt-2 pb-2 flex flex-col gap-2">
         {/* <div className="flex flex-wrap gap-4 items-center">
           <button
             onClick={() => setIsCreateGeographyModalOpen(true)}
@@ -896,7 +896,7 @@ const handleDeleteGeography = (geography, e) => {
         </div> */}
 
         {/* Upload Section */}
-        <div className="flex flex-wrap gap-4 items-center p-4 bg-gray-50 rounded-xl border">
+        <div className="flex flex-wrap gap-3 items-center p-3 bg-gray-50 rounded-xl border">
           <span className="text-sm font-semibold text-gray-700">Bulk Upload:</span>
           
           {/* Verisma Upload */}
@@ -948,10 +948,10 @@ const handleDeleteGeography = (geography, e) => {
           </div>
 
           {/* Download Templates */}
-          <div className="flex items-center gap-2 ml-4 border-l pl-4">
+          <div className="flex items-center gap-2 ml-3 border-l pl-3">
             <button
               onClick={() => {
-                const csvContent = "geography,client,process type,location,request type,payout rate\nUS,Verisma,Data Processing,Location A,New Request,3.00\nUS,Verisma,Data Processing,Location A,Key,2.50\nUS,Verisma,Data Processing,Location A,Duplicate,2.00\n";
+                const csvContent = "geography,client,process type,location,request type,request rate,payout rate\nUS,Verisma,Data Processing,Location A,New Request,3.00,5.00\nUS,Verisma,Data Processing,Location A,Key,2.50,5.00\nUS,Verisma,Data Processing,Location A,Duplicate,2.00,5.00\n";
                 const blob = new Blob([csvContent], { type: "text/csv" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
@@ -967,7 +967,7 @@ const handleDeleteGeography = (geography, e) => {
 
             <button
               onClick={() => {
-                const csvContent = "geography,location,process_type,nrs_rate,other_processing_rate,processed_rate,file_drop_rate,manual_rate,payout_rate,billing_rate\nUS,Fairview Processing,Processing,2.25,0,0,0,3.00,3.00,0\nUS,Christus Health,Logging,0,0,0,0,0,0,1.08\nUS,Payer Location,MRO Payer Project,0,0,0,0,0,0,2.00\n";
+                const csvContent = "geography,client,location,process_type,nrs_rate,other_processing_rate,processed_rate,file_drop_rate,manual_rate,payout_rate,billing_rate\nUS,MRO,Fairview Processing,Processing,2.25,0,0,0,3.00,3.00,0\nUS,MRO,Christus Health,Logging,0,0,0,0,0,0,1.08\nUS,MRO,Payer Location,MRO Payer Project,0,0,0,0,0,0,2.00\n";
                 const blob = new Blob([csvContent], { type: "text/csv" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
@@ -997,6 +997,61 @@ const handleDeleteGeography = (geography, e) => {
               Datavant Template
             </button>
           </div>
+
+          {/* Export Data */}
+          <div className="flex items-center gap-2 ml-3 border-l pl-3">
+            <button
+              onClick={async () => {
+                try {
+                  toast.loading("Exporting Verisma data...");
+                  const res = await axios.get(`${apiUrl}/upload/verisma-export`, {
+                    responseType: "blob",
+                  });
+                  const url = window.URL.createObjectURL(res.data);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = "verisma-project-export.csv";
+                  a.click();
+                  window.URL.revokeObjectURL(url);
+                  toast.dismiss();
+                  toast.success("Verisma data exported!");
+                } catch (err) {
+                  toast.dismiss();
+                  toast.error(err?.response?.data?.error || "Verisma export failed");
+                }
+              }}
+              className="text-indigo-700 bg-indigo-50 border border-indigo-300 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-indigo-100 transition text-sm font-medium"
+            >
+              <ArrowDownTrayIcon className="w-4 h-4" />
+              Export Verisma
+            </button>
+
+            <button
+              onClick={async () => {
+                try {
+                  toast.loading("Exporting MRO data...");
+                  const res = await axios.get(`${apiUrl}/mro-upload/mro-export`, {
+                    responseType: "blob",
+                  });
+                  const url = window.URL.createObjectURL(res.data);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = "mro-project-export.csv";
+                  a.click();
+                  window.URL.revokeObjectURL(url);
+                  toast.dismiss();
+                  toast.success("MRO data exported!");
+                } catch (err) {
+                  toast.dismiss();
+                  toast.error(err?.response?.data?.error || "MRO export failed");
+                }
+              }}
+              className="text-green-700 bg-green-50 border border-green-300 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-green-100 transition text-sm font-medium"
+            >
+              <ArrowDownTrayIcon className="w-4 h-4" />
+              Export MRO
+            </button>
+          </div>
         </div>
 
         {/* Verisma CSV Format Info */}
@@ -1004,9 +1059,17 @@ const handleDeleteGeography = (geography, e) => {
           <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 shadow-sm text-sm">
             <h3 className="font-semibold text-indigo-800 mb-2"> Verisma CSV Format</h3>
             <pre className="bg-white border rounded-lg p-3 overflow-x-auto text-xs">
-geography,client,process type,location,request type,payout rate</pre>
+geography,client,process type,location,request type,request rate,payout rate</pre>
             <div className="mt-2 text-xs text-gray-600">
               <strong>Request Types:</strong> New Request, Key, Duplicate
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+              <div className="bg-blue-100 rounded p-2">
+                <strong>Request Rate:</strong> Billing rate per request type (New Request, Key, Duplicate)
+              </div>
+              <div className="bg-green-100 rounded p-2">
+                <strong>Payout Rate:</strong> Flat payout rate per location for the resource
+              </div>
             </div>
           </div>
         )}
@@ -1016,7 +1079,7 @@ geography,client,process type,location,request type,payout rate</pre>
           <div className="bg-green-50 border border-green-200 rounded-xl p-4 shadow-sm text-sm">
             <h3 className="font-semibold text-green-800 mb-2">MRO CSV Format</h3>
             <pre className="bg-white border rounded-lg p-3 overflow-x-auto text-xs">
-geography,location,process_type,nrs_rate,other_processing_rate,processed_rate,file_drop_rate,manual_rate,payout_rate,billing_rate</pre>
+geography,client,location,process_type,nrs_rate,other_processing_rate,processed_rate,file_drop_rate,manual_rate,payout_rate,billing_rate</pre>
             <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
               <div className="bg-teal-100 rounded p-2">
                 <strong>Process Types:</strong><br/>Processing, Logging, MRO Payer Project
@@ -1053,7 +1116,7 @@ geography,process type,rate,flat rate</pre>
       </div>
 
       {/* Stats Bar */}
-      <div className="px-8 pb-4">
+      <div className="px-6 pb-2">
         <div className="flex items-center gap-4 text-sm text-gray-600">
           <span>
             Showing <span className="font-semibold">{geographies.length}</span> of <span className="font-semibold">{totalGeographies}</span> geographies
@@ -1068,7 +1131,7 @@ geography,process type,rate,flat rate</pre>
       </div>
 
       {/* Main Table */}
-      <div className="px-8 pb-8 flex-1 min-h-0">
+      <div className="px-6 pb-6 mb-4 flex-1 min-h-0">
         {loading && geographies.length === 0 ? (
           <div className="flex justify-center items-center p-12 bg-white rounded-xl border">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
@@ -1081,7 +1144,7 @@ geography,process type,rate,flat rate</pre>
           <div
             ref={scrollContainerRef}
             className="overflow-auto rounded-xl shadow-sm border bg-white"
-            style={{ maxHeight: "calc(100vh - 420px)" }}
+            style={{ maxHeight: "calc(100vh - 300px)" }}
           >
             <table className="min-w-full text-sm">
               <thead className="bg-gray-100 sticky top-0 z-20">

@@ -68,6 +68,8 @@ const MRODashboard = () => {
   const [detailedTotal, setDetailedTotal] = useState(0);
   const [detailedLoading, setDetailedLoading] = useState(false);
   const [detailedSearch, setDetailedSearch] = useState('');
+  const [detailedStartDate, setDetailedStartDate] = useState('');
+  const [detailedEndDate, setDetailedEndDate] = useState('');
   
   const [sortConfig, setSortConfig] = useState({ key: 'location', direction: 'asc' });
 
@@ -450,6 +452,53 @@ const MRODashboard = () => {
     });
   }, [loggingSummary, sortConfig]);
 
+  // Grouped detailed entries - group by date + resource + location + request_type
+  const groupedDetailed = useMemo(() => {
+    let filtered = detailedData;
+
+    // Date filter
+    if (detailedStartDate) {
+      const start = new Date(detailedStartDate);
+      start.setHours(0, 0, 0, 0);
+      filtered = filtered.filter(a => {
+        const d = new Date(a.allocation_date);
+        return d >= start;
+      });
+    }
+    if (detailedEndDate) {
+      const end = new Date(detailedEndDate);
+      end.setHours(23, 59, 59, 999);
+      filtered = filtered.filter(a => {
+        const d = new Date(a.allocation_date);
+        return d <= end;
+      });
+    }
+
+    // Group by date + resource + location + request_type
+    const groupMap = new Map();
+    filtered.forEach(a => {
+      const dateKey = a.allocation_date ? new Date(a.allocation_date).toISOString().split('T')[0] : 'unknown';
+      const key = `${dateKey}|${a.resource_name || ''}|${a.subproject_name || ''}|${a.request_type || ''}`;
+      if (!groupMap.has(key)) {
+        groupMap.set(key, {
+          allocation_date: a.allocation_date,
+          resource_name: a.resource_name,
+          subproject_name: a.subproject_name,
+          request_type: a.request_type,
+          requestor_type: a.requestor_type,
+          process_type: a.process_type || 'Unknown',
+          count: 0
+        });
+      }
+      const group = groupMap.get(key);
+      group.count += 1;
+    });
+
+    return Array.from(groupMap.values()).sort((a, b) =>
+      new Date(b.allocation_date) - new Date(a.allocation_date)
+    );
+  }, [detailedData, detailedStartDate, detailedEndDate]);
+
   const exportCSV = () => {
     const data = activeView === 'processing' ? sortedProcessing : sortedLogging;
     const types = activeView === 'processing' ? allTypes : loggingTypes;
@@ -701,10 +750,22 @@ const MRODashboard = () => {
           <div className="px-3 py-2 border-b bg-gray-50 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <button onClick={() => setShowDetailed(!showDetailed)} className="text-gray-500 hover:text-gray-700">{showDetailed ? '▼' : '▶'}</button>
-              <span className="text-xs font-semibold text-gray-700">📋 Detailed Entries • {formatNumber(detailedTotal)} records</span>
+              <span className="text-xs font-semibold text-gray-700">Detailed Entries • {formatNumber(groupedDetailed.length)} records</span>
             </div>
-            <input type="text" placeholder="Search..." value={detailedSearch} onChange={(e) => setDetailedSearch(e.target.value)}
-              className="px-2 py-1 text-xs border rounded w-36" />
+            <div className="flex items-center gap-2">
+              <label className="text-[10px] text-gray-500">From:</label>
+              <input type="date" value={detailedStartDate} onChange={(e) => setDetailedStartDate(e.target.value)}
+                className="px-1.5 py-1 text-xs border rounded" />
+              <label className="text-[10px] text-gray-500">To:</label>
+              <input type="date" value={detailedEndDate} onChange={(e) => setDetailedEndDate(e.target.value)}
+                className="px-1.5 py-1 text-xs border rounded" />
+              {(detailedStartDate || detailedEndDate) && (
+                <button onClick={() => { setDetailedStartDate(''); setDetailedEndDate(''); }}
+                  className="px-1.5 py-1 text-[10px] bg-red-100 text-red-600 rounded hover:bg-red-200">Clear</button>
+              )}
+              <input type="text" placeholder="Search..." value={detailedSearch} onChange={(e) => setDetailedSearch(e.target.value)}
+                className="px-2 py-1 text-xs border rounded w-36" />
+            </div>
           </div>
 
           {showDetailed && (
@@ -716,31 +777,27 @@ const MRODashboard = () => {
                       <th className="py-2 px-2 text-left font-semibold border-b">Date</th>
                       <th className="py-2 px-2 text-left font-semibold border-b">Resource</th>
                       <th className="py-2 px-2 text-left font-semibold border-b">Location</th>
-                      <th className="py-2 px-2 text-left font-semibold border-b">Req ID</th>
+                      <th className="py-2 px-2 text-left font-semibold border-b">Process Type</th>
                       <th className="py-2 px-2 text-left font-semibold border-b">Type</th>
                       <th className="py-2 px-2 text-left font-semibold border-b">Requestor</th>
-                      <th className="py-2 px-2 text-right font-semibold border-b">Rate</th>
-                      <th className="py-2 px-2 text-right font-semibold border-b bg-green-50">Amount</th>
-                      <th className="py-2 px-2 text-left font-semibold border-b">Remark</th>
+                      <th className="py-2 px-2 text-right font-semibold border-b">Count</th>
                     </tr>
                   </thead>
                   <tbody>
                     {detailedLoading ? (
-                      <tr><td colSpan={9} className="py-6 text-center text-gray-500">Loading...</td></tr>
-                    ) : detailedData.length === 0 ? (
-                      <tr><td colSpan={9} className="py-6 text-center text-gray-500">No entries</td></tr>
+                      <tr><td colSpan={7} className="py-6 text-center text-gray-500">Loading...</td></tr>
+                    ) : groupedDetailed.length === 0 ? (
+                      <tr><td colSpan={7} className="py-6 text-center text-gray-500">No entries</td></tr>
                     ) : (
-                      detailedData.map((a, i) => (
-                        <tr key={a._id || i} className="border-b border-slate-100 hover:bg-slate-50">
+                      groupedDetailed.map((a, i) => (
+                        <tr key={`${a.allocation_date}-${a.resource_name}-${a.subproject_name}-${a.request_type}-${i}`} className="border-b border-slate-100 hover:bg-slate-50">
                           <td className="py-1.5 px-2 text-slate-600">{formatDate(a.allocation_date)}</td>
                           <td className="py-1.5 px-2 font-medium text-slate-800">{a.resource_name}</td>
                           <td className="py-1.5 px-2 text-slate-700 max-w-[100px] truncate" title={a.subproject_name}>{a.subproject_name}</td>
-                          <td className="py-1.5 px-2 text-slate-600 font-mono text-[10px]">{a.request_id || '—'}</td>
+                          <td className="py-1.5 px-2 text-slate-600">{a.process_type}</td>
                           <td className="py-1.5 px-2"><RequestTypeBadge type={a.request_type} /></td>
                           <td className="py-1.5 px-2"><RequestTypeBadge type={a.requestor_type} /></td>
-                          <td className="py-1.5 px-2 text-right text-slate-600">{formatCurrency(a.billing_rate)}</td>
-                          <td className="py-1.5 px-2 text-right font-semibold text-green-700 bg-green-50/50">{formatCurrency(a.billing_amount)}</td>
-                          <td className="py-1.5 px-2 text-slate-500 max-w-[80px] truncate" title={a.remark}>{a.remark || '—'}</td>
+                          <td className="py-1.5 px-2 text-right font-medium text-slate-800">{a.count}</td>
                         </tr>
                       ))
                     )}
@@ -748,7 +805,7 @@ const MRODashboard = () => {
                 </table>
               </div>
 
-              {detailedPages > 1 && (
+              {detailedPages > 1 && !detailedStartDate && !detailedEndDate && (
                 <div className="px-3 py-2 border-t bg-gray-50 flex items-center justify-between text-xs">
                   <span className="text-gray-500">Page {detailedPage} of {detailedPages}</span>
                   <div className="flex items-center gap-1">

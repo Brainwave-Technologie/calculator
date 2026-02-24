@@ -272,6 +272,7 @@ router.post('/', authenticateResource, async (req, res) => {
       billing_rate: billingRate,
       billing_amount: billingRate * entryCount,
       billing_rate_at_logging: billingRate,
+      payout_rate: subproject.flatrate || 0,
       source: 'direct_entry',
       is_late_log: isLateLog,
       days_late: daysLate,
