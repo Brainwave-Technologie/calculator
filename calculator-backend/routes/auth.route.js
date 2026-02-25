@@ -121,7 +121,7 @@ console.log('Wait time:', waitTime)
     await resource.save();
 
     // Send OTP email
-    const emailResult = await sendOTPEmail(email, otp, resource.name);
+    const emailResult = await sendOTPEmailDevelopment(email, otp, resource.name);
     
     if (!emailResult.success) {
       console.error('Failed to send OTP email:', emailResult.error);

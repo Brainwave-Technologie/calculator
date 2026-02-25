@@ -669,6 +669,7 @@ router.get('/mro/detailed', async (req, res) => {
     console.error('Detailed allocations error:', err);
     res.status(500).json({ message: err.message });
   }
+  //this is jsut test
 });
 
 module.exports = router;

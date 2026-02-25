@@ -161,6 +161,154 @@ router.post('/', verifyResourceToken, async (req, res) => {
   }
 });
 
+// POST: Create batch allocation entries (multiple Request IDs with shared fields)
+router.post('/batch', verifyResourceToken, async (req, res) => {
+  try {
+    const {
+      subproject_id,
+      allocation_date,
+      facility_name,
+      request_type,
+      requestor_type,
+      processing_time,
+      request_ids
+    } = req.body;
+
+    // Validate required shared fields
+    if (!subproject_id || !allocation_date || !request_type) {
+      return res.status(400).json({
+        message: 'Subproject, allocation date, and request type are required'
+      });
+    }
+
+    if (!Array.isArray(request_ids) || request_ids.length === 0) {
+      return res.status(400).json({
+        message: 'At least one Request ID is required'
+      });
+    }
+
+    // Filter out empty request_ids
+    const filledRequestIds = request_ids
+      .map(id => (id || '').trim())
+      .filter(id => id !== '');
+
+    if (filledRequestIds.length === 0) {
+      return res.status(400).json({
+        message: 'All Request ID fields are empty. Please fill at least one.'
+      });
+    }
+
+    // Check if date is locked
+    if (MRODailyAllocation.isDateLocked(allocation_date)) {
+      return res.status(400).json({
+        message: 'Cannot add entries for locked month. Month has ended.'
+      });
+    }
+
+    // Get subproject details (single lookup, shared across all entries)
+    const subproject = await Subproject.findById(subproject_id);
+    if (!subproject) {
+      return res.status(404).json({ message: 'Location not found' });
+    }
+
+    // Determine process type and billing rate (shared)
+    const processType = subproject.project_name?.includes('Processing') ? 'Processing' :
+                        subproject.project_name?.includes('Logging') ? 'Logging' :
+                        'MRO Payer Project';
+
+    let billingRate = 0;
+    if (processType === 'Processing' && requestor_type) {
+      let rateEntry = await SubprojectRequestorType.findOne({
+        subproject_id: subproject._id,
+        name: requestor_type
+      }).lean();
+      if (!rateEntry?.rate && (requestor_type === 'Processed' || requestor_type === 'Processed through File Drop')) {
+        rateEntry = await SubprojectRequestorType.findOne({
+          subproject_id: subproject._id,
+          name: 'Manual'
+        }).lean();
+      }
+      billingRate = rateEntry?.rate || 0;
+    } else if (processType === 'Logging') {
+      billingRate = subproject.flatrate || 1.08;
+    }
+
+    // Get starting SR number, then increment for each entry
+    let srNo = await MRODailyAllocation.getNextSrNo(req.resource.email, allocation_date);
+
+    // Create all entries
+    const createdEntries = [];
+    const errors = [];
+
+    for (const requestId of filledRequestIds) {
+      try {
+        const allocation = new MRODailyAllocation({
+          sr_no: srNo,
+          allocation_date: new Date(allocation_date),
+          logged_date: new Date(allocation_date),
+          system_captured_date: new Date(),
+
+          resource_id: req.resource._id,
+          resource_name: req.resource.name,
+          resource_email: req.resource.email,
+
+          geography_id: subproject.geography_id,
+          geography_name: subproject.geography_name,
+          client_id: subproject.client_id,
+          client_name: subproject.client_name || 'MRO',
+          project_id: subproject.project_id,
+          project_name: subproject.project_name,
+          subproject_id: subproject._id,
+          subproject_name: subproject.name,
+          subproject_key: subproject.business_key,
+
+          facility_name: facility_name || '',
+          request_id: requestId,
+          request_type,
+          requestor_type: requestor_type || '',
+          process_type: processType,
+          processing_time: processing_time || '',
+          remark: '',
+
+          billing_rate: billingRate,
+          billing_amount: billingRate,
+          billing_rate_at_logging: billingRate,
+
+          source: 'direct_entry'
+        });
+
+        await allocation.save();
+        createdEntries.push(allocation);
+
+        // Log activity for each entry
+        try {
+          await ActivityLog.logCaseEntry(allocation, req.resource, 'resource');
+        } catch (logErr) {
+          console.log('Activity log error (non-fatal):', logErr.message);
+        }
+
+        srNo++;
+      } catch (entryErr) {
+        errors.push({ request_id: requestId, error: entryErr.message });
+      }
+    }
+
+    res.status(201).json({
+      success: true,
+      message: `Batch created: ${createdEntries.length} entries saved${errors.length > 0 ? `, ${errors.length} failed` : ''}`,
+      total_submitted: filledRequestIds.length,
+      created_count: createdEntries.length,
+      error_count: errors.length,
+      errors: errors.length > 0 ? errors : undefined,
+      data: createdEntries
+    });
+
+  } catch (error) {
+    console.error('Batch allocation error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // GET: Today's allocations for current resource
 router.get('/my-allocations', verifyResourceToken, async (req, res) => {
   try {

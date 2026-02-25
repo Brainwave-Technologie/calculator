@@ -863,15 +863,27 @@ router.put('/:id/assignments', authenticateUser, async (req, res) => {
     // Validate and enrich assignments with names and assigned_date
     const enrichedAssignments = [];
     
+    const keptAsIsAssignments = [];
+
     for (const assignment of assignments) {
-      const geography = await Geography.findById(assignment.geography_id);
-      const client = await Client.findById(assignment.client_id);
-      const project = await Project.findById(assignment.project_id);
-      
+      const geography = await Geography.findById(assignment.geography_id).catch(() => null);
+      const client = await Client.findById(assignment.client_id).catch(() => null);
+      const project = await Project.findById(assignment.project_id).catch(() => null);
+
       if (!geography || !client || !project) {
-        return res.status(400).json({ 
-          message: 'Invalid geography, client, or project ID in assignment' 
-        });
+        // Check if this assignment already exists in the resource's current data.
+        // If so, preserve it as-is (stale project reference from re-upload).
+        const existingMatch = resource.assignments.find(ea =>
+          ea.project_id?.toString() === assignment.project_id?.toString() &&
+          ea.client_id?.toString() === assignment.client_id?.toString()
+        );
+        if (existingMatch) {
+          enrichedAssignments.push(existingMatch);
+          keptAsIsAssignments.push(`Kept existing assignment for ${existingMatch.project_name || assignment.project_id} (project reference stale)`);
+          continue;
+        }
+        // Truly invalid (not in existing assignments either) - skip
+        continue;
       }
       
       const subprojects = [];
@@ -916,10 +928,12 @@ router.put('/:id/assignments', authenticateUser, async (req, res) => {
     resource.assignments = enrichedAssignments;
     resource.updated_by = adminEmail;
     await resource.save();
-    
+
     res.json({
       success: true,
-      message: 'Assignments updated successfully',
+      message: keptAsIsAssignments.length > 0
+        ? `Assignments updated. ${keptAsIsAssignments.length} assignment(s) with stale references were preserved.`
+        : 'Assignments updated successfully',
       assignments: resource.assignments
     });
   } catch (error) {

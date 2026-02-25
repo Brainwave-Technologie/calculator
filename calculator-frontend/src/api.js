@@ -27,16 +27,41 @@ api.interceptors.request.use(
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    // Handle global errors here
     if (error.response) {
       if (error.response.status === 401) {
-        toast.error("Wrong Credentials. Please try again.");
-        // Optionally logout or redirect
+        const isAuthRoute = error.config?.url?.includes('/auth/');
+        if (isAuthRoute) {
+          toast.error("Wrong Credentials. Please try again.");
+        } else {
+          toast.error("Session expired. Please login again.");
+          localStorage.removeItem('token');
+          localStorage.removeItem('userType');
+          localStorage.removeItem('resourceInfo');
+          window.location.href = '/login';
+        }
       }
     } else {
       console.error("Network Error:", error.message);
     }
 
+    return Promise.reject(error);
+  }
+);
+
+// Also handle 401 on the default axios instance (used by pages like Resources.jsx)
+axios.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      const isAuthRoute = error.config?.url?.includes('/auth/');
+      if (!isAuthRoute) {
+        toast.error("Session expired. Please login again.");
+        localStorage.removeItem('token');
+        localStorage.removeItem('userType');
+        localStorage.removeItem('resourceInfo');
+        window.location.href = '/login';
+      }
+    }
     return Promise.reject(error);
   }
 );
