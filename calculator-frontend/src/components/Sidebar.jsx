@@ -6,6 +6,7 @@ import {
   CalculatorIcon,
   Cog6ToothIcon,
   ArrowLeftOnRectangleIcon,
+  ClipboardDocumentCheckIcon,
 } from "@heroicons/react/24/outline";
 import { FaChartBar } from "react-icons/fa";
 import { FiDatabase } from "react-icons/fi";
@@ -27,6 +28,7 @@ const navItems = [
   // { name: "Complete Log Bonus", icon: CurrencyDollarIcon, path: "/payout/complete-logging-bonus" },
   { name: "Resource Cases", icon: UsersIcon, path: "/admin-resource-cases" },
   {name: "Delete Requests", icon: FolderIcon, path: "/admin-delete-requests"},
+  { name: "QC Dashboard", icon: ClipboardDocumentCheckIcon, path: "/qc-dashboard" },
   { name: "Master Database", icon: FiDatabase, path: "/masterdatabase" },
   { name: "Settings", icon: CiSettings, path: "/settings" },
 ];

@@ -307,6 +307,12 @@ const ResourceDashboard = () => {
                 </svg>
                 Previous Cases
               </button>
+              <button onClick={() => navigate('/resource/qc-tasks')} className="px-3 py-1.5 text-xs bg-purple-100 text-purple-700 rounded hover:bg-purple-200 flex items-center gap-1 font-medium">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                QC Tasks
+              </button>
               <div className="text-right">
                 <p className="text-sm font-medium text-gray-800">{resourceInfo?.name}</p>
                 <p className="text-xs text-gray-500">{resourceInfo?.email}</p>

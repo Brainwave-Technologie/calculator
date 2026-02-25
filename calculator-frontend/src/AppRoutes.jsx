@@ -18,6 +18,7 @@ import BillingDashboard from "./pages/Dashboard";
 
 // Resource pages
 import ResourceDashboard from "./pages/resources/ResourceDashboard";
+import QCTasks from "./pages/resources/QCTasks";
 import MRODetailedEntries from "./pages/payout/Detailedallocationentries";
 import VerismaDetailedEntries from "./pages/payout/Detailedallocationentries";
 // Protected route components
@@ -28,6 +29,7 @@ import ResourceLoginActivity from "./pages/admin/ResourceLoginActivity";
 import AdminPreviousCases from "./pages/admin/AdminPreviousCases";
 import AdminDeleteRequests from "./pages/admin/AdminDeleteRequests";
 import AdminResourceCases from "./pages/admin/AdminResourceCases";
+import AdminQCDashboard from "./pages/admin/AdminQCDashboard";
 
 // ═══════════════════════════════════════════════════════════════
 // NEW UNIFIED DASHBOARDS - Single page with client navigation
@@ -90,6 +92,7 @@ const AppRoutes = () => {
         <Route path="/payout/complete-logging-bonus" element={<CompleteLoggingBonusPayout />} />
         <Route path="/payout/daily-cases" element={<PayoutDailyCasesPage />} />
         <Route path="/datavant-dashboard" element={<DatavantDashboard />} />
+        <Route path="/qc-dashboard" element={<AdminQCDashboard />} />
       </Route>
 
       {/* Resource routes */}
@@ -106,6 +109,14 @@ const AppRoutes = () => {
         element={
           <ResourceRoute>
             <PreviousLoggedCases />
+          </ResourceRoute>
+        }
+      />
+      <Route
+        path="/resource/qc-tasks"
+        element={
+          <ResourceRoute>
+            <QCTasks />
           </ResourceRoute>
         }
       />

@@ -599,7 +599,7 @@ const MROAllocationPanel = ({
                 </div>
                 
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Requestor Type</label>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Requestor Type {isProcessingType && <span className="text-red-500">*</span>}</label>
                   {isProcessingType ? (
                     <select
                       value={formData.requestor_type}
@@ -623,24 +623,52 @@ const MROAllocationPanel = ({
                     <h4 className="text-xs font-semibold text-purple-800">Batch Entry Mode</h4>
                     <div className="flex items-center gap-2">
                       <label className="text-xs text-purple-700">Batch Size:</label>
-                      <select
-                        value={batchSize}
-                        onChange={(e) => {
-                          const newSize = parseInt(e.target.value);
-                          setBatchSize(newSize);
-                          setBatchRequestIds(prev => {
-                            if (newSize > prev.length) {
-                              return [...prev, ...Array(newSize - prev.length).fill('')];
-                            }
-                            return prev.slice(0, newSize);
-                          });
-                        }}
-                        className="px-2 py-1 text-xs border border-purple-300 rounded"
-                      >
-                        {[10, 20, 30, 40, 50, 60, 70, 80, 90, 100].map(n => (
-                          <option key={n} value={n}>{n}</option>
-                        ))}
-                      </select>
+                      <div className="flex items-center">
+                        {batchSize > 10 && (
+                          <button
+                            onClick={() => {
+                              const newSize = batchSize - 1;
+                              setBatchSize(newSize);
+                              setBatchRequestIds(prev => prev.slice(0, newSize));
+                            }}
+                            className="px-1.5 py-1 text-xs bg-purple-200 text-purple-800 rounded-l border border-purple-300 hover:bg-purple-300 font-bold"
+                          >
+                            −
+                          </button>
+                        )}
+                        <select
+                          value={[10, 20, 30, 40, 50, 60, 70, 80, 90, 100].includes(batchSize) ? batchSize : ''}
+                          onChange={(e) => {
+                            const newSize = parseInt(e.target.value);
+                            setBatchSize(newSize);
+                            setBatchRequestIds(prev => {
+                              if (newSize > prev.length) {
+                                return [...prev, ...Array(newSize - prev.length).fill('')];
+                              }
+                              return prev.slice(0, newSize);
+                            });
+                          }}
+                          className={`px-2 py-1 text-xs border-t border-b border-purple-300 text-center w-16 ${batchSize <= 10 ? 'rounded-l border-l' : ''}`}
+                        >
+                          {![10, 20, 30, 40, 50, 60, 70, 80, 90, 100].includes(batchSize) && (
+                            <option value="">{batchSize}</option>
+                          )}
+                          {[10, 20, 30, 40, 50, 60, 70, 80, 90, 100].map(n => (
+                            <option key={n} value={n}>{n}</option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => {
+                            const newSize = Math.min(200, batchSize + 1);
+                            setBatchSize(newSize);
+                            setBatchRequestIds(prev => [...prev, '']);
+                          }}
+                          disabled={batchSize >= 200}
+                          className="px-1.5 py-1 text-xs bg-purple-200 text-purple-800 rounded-r border border-purple-300 hover:bg-purple-300 disabled:opacity-40 disabled:cursor-not-allowed font-bold"
+                        >
+                          +
+                        </button>
+                      </div>
                       <button
                         onClick={() => {
                           setIsBatchMode(false);
@@ -752,14 +780,15 @@ const MROAllocationPanel = ({
                   </button>
                 )}
 
-                {isProcessingType && formData.requestor_type && !isBatchMode && formData.request_type && (
+                {!isBatchMode && (
                   <button
                     onClick={() => {
                       setIsBatchMode(true);
                       setBatchSize(10);
                       setBatchRequestIds(Array(10).fill(''));
                     }}
-                    className="px-4 py-1.5 bg-purple-600 text-white text-xs font-medium rounded hover:bg-purple-700"
+                    disabled={!formData.subproject_id || !formData.request_type || !dateValidation.valid || (isProcessingType && !formData.requestor_type)}
+                    className="px-4 py-1.5 bg-purple-600 text-white text-xs font-medium rounded hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
                   >
                     Create Batch
                   </button>

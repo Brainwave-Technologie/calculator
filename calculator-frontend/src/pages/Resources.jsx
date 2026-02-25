@@ -16,6 +16,7 @@ import {
   BuildingOfficeIcon,
   FolderIcon,
   UserPlusIcon,
+  ClipboardDocumentCheckIcon,
 } from "@heroicons/react/24/outline";
 import ConfirmDeleteProjectModal from "../components/Project/ConfirmDeleteProjectModal";
 import toast from "react-hot-toast";
@@ -35,6 +36,9 @@ const apiService = {
   getClients: (geoId, params) => axios.get(`${apiBaseUrl}/client/geography/${geoId}`, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` }, params }),
   getProjects: (clientId, params) => axios.get(`${apiBaseUrl}/project/client/${clientId}`, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` }, params }),
   getSubprojects: (projectId, params) => axios.get(`${apiBaseUrl}/project/${projectId}/subproject`, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` }, params }),
+  assignQC: (data) => axios.post(`${apiBaseUrl}/qc-assignments`, data, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } }),
+  getQCResourcesList: () => axios.get(`${apiBaseUrl}/qc-assignments/resources-list`, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } }),
+  getLoggedResources: (params) => axios.get(`${apiBaseUrl}/qc-assignments/logged-resources`, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` }, params }),
 };
 
 // --- DEBOUNCE HOOK ---
@@ -537,6 +541,212 @@ const AssignLocationsModal = React.memo(({ isOpen, onClose, resource, onSave }) 
 });
 AssignLocationsModal.displayName = "AssignLocationsModal";
 
+// --- QC ASSIGN MODAL ---
+// Flow: 1. Select Client -> 2. Select Date -> 3. Pick from resources who logged on that date/client
+const QCAssignModal = React.memo(({ isOpen, onClose, targetResource }) => {
+  const [clientType, setClientType] = useState('');
+  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [sourceResourceEmail, setSourceResourceEmail] = useState('');
+  const [loggedResources, setLoggedResources] = useState([]);
+  const [loadingResources, setLoadingResources] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState(null);
+  const [searchTerm, setSearchTerm] = useState('');
+
+  // Reset everything when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      setClientType('');
+      setDate(new Date().toISOString().split('T')[0]);
+      setSourceResourceEmail('');
+      setLoggedResources([]);
+      setResult(null);
+      setSearchTerm('');
+    }
+  }, [isOpen]);
+
+  // Fetch resources who logged cases when both client and date are selected
+  useEffect(() => {
+    if (!clientType || !date) {
+      setLoggedResources([]);
+      setSourceResourceEmail('');
+      return;
+    }
+    setLoadingResources(true);
+    setSourceResourceEmail('');
+    setResult(null);
+    apiService.getLoggedResources({ client_type: clientType, date })
+      .then(res => {
+        const resources = (res.data?.resources || []).filter(r => r.email !== targetResource?.email);
+        setLoggedResources(resources);
+      })
+      .catch(err => {
+        console.error('Error fetching logged resources:', err);
+        setLoggedResources([]);
+      })
+      .finally(() => setLoadingResources(false));
+  }, [clientType, date, targetResource]);
+
+  const filteredResources = useMemo(() => {
+    if (!searchTerm) return loggedResources;
+    const lower = searchTerm.toLowerCase();
+    return loggedResources.filter(r => r.name?.toLowerCase().includes(lower) || r.email?.toLowerCase().includes(lower));
+  }, [loggedResources, searchTerm]);
+
+  const handleClientChange = (ct) => {
+    setClientType(ct);
+    setSourceResourceEmail('');
+    setResult(null);
+  };
+
+  const handleDateChange = (newDate) => {
+    setDate(newDate);
+    setSourceResourceEmail('');
+    setResult(null);
+  };
+
+  const handleSubmit = async () => {
+    if (!clientType) { toast.error('Please select a client'); return; }
+    if (!date) { toast.error('Please select a date'); return; }
+    if (!sourceResourceEmail) { toast.error('Please select a source resource'); return; }
+
+    setSubmitting(true);
+    setResult(null);
+    try {
+      const res = await apiService.assignQC({
+        target_resource_id: targetResource._id,
+        source_resource_email: sourceResourceEmail,
+        date,
+        client_type: clientType
+      });
+      setResult(res.data);
+      toast.success(res.data.message);
+    } catch (err) {
+      const msg = err.response?.data?.message || 'Failed to assign QC';
+      toast.error(msg);
+      setResult({ error: true, message: msg });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (!isOpen || !targetResource) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-60 flex justify-center items-center z-50">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
+        {/* Header */}
+        <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between bg-gradient-to-r from-purple-50 to-indigo-50">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-purple-600 rounded-full flex items-center justify-center text-white font-bold text-sm">QC</div>
+            <div>
+              <h2 className="text-lg font-bold text-gray-900">Assign QC Tasks</h2>
+              <p className="text-sm text-gray-500">To: {targetResource.name} ({targetResource.email})</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-2 hover:bg-white rounded-lg transition">
+            <XMarkIcon className="w-6 h-6" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-5">
+          {/* Step 1: Client */}
+          <div>
+            <label className="block text-sm font-semibold text-gray-700 mb-1.5">
+              <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-white text-xs font-bold mr-2 ${clientType ? 'bg-green-500' : 'bg-purple-600'}`}>1</span>
+              Select Client
+            </label>
+            <div className="grid grid-cols-3 gap-3 mt-2">
+              {['MRO', 'Verisma', 'Datavant'].map(ct => (
+                <button
+                  key={ct}
+                  onClick={() => handleClientChange(ct)}
+                  className={`px-4 py-2.5 text-sm font-medium rounded-xl border-2 transition ${
+                    clientType === ct
+                      ? 'bg-purple-600 text-white border-purple-600'
+                      : 'bg-white text-gray-700 border-gray-300 hover:border-purple-400 hover:bg-purple-50'
+                  }`}
+                >
+                  {ct}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Step 2: Date */}
+          <div className={!clientType ? 'opacity-50 pointer-events-none' : ''}>
+            <label className="block text-sm font-semibold text-gray-700 mb-1.5">
+              <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-white text-xs font-bold mr-2 ${clientType && date ? 'bg-green-500' : 'bg-purple-600'}`}>2</span>
+              Date of Logged Cases
+            </label>
+            <input
+              type="date"
+              value={date}
+              onChange={e => handleDateChange(e.target.value)}
+              max={new Date().toISOString().split('T')[0]}
+              disabled={!clientType}
+              className="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
+            />
+          </div>
+
+          {/* Step 3: Source resource dropdown */}
+          <div className={!clientType || !date ? 'opacity-50 pointer-events-none' : ''}>
+            <label className="block text-sm font-semibold text-gray-700 mb-1.5">
+              <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-white text-xs font-bold mr-2 ${sourceResourceEmail ? 'bg-green-500' : 'bg-purple-600'}`}>3</span>
+              Source Resource
+            </label>
+            <select
+              value={sourceResourceEmail}
+              onChange={e => setSourceResourceEmail(e.target.value)}
+              disabled={!clientType || !date || loadingResources}
+              className="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
+            >
+              <option value="">
+                {loadingResources ? 'Loading...' : loggedResources.length === 0 && clientType && date ? 'No resources logged on this date' : 'Select resource...'}
+              </option>
+              {loggedResources.map(r => (
+                <option key={r.email} value={r.email}>
+                  {r.name} ({r.email}) - {r.case_count} case{r.case_count !== 1 ? 's' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Result */}
+          {result && (
+            <div className={`rounded-xl p-4 text-sm border ${result.error ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'}`}>
+              <p className="font-semibold">{result.message}</p>
+              {!result.error && (
+                <div className="mt-2 flex gap-4 text-xs">
+                  <span>Assigned: <strong>{result.assigned_count}</strong></span>
+                  <span>Skipped: <strong>{result.skipped_count}</strong></span>
+                  <span>Total Source: <strong>{result.total_source_cases}</strong></span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 flex justify-end gap-3">
+          <button onClick={onClose} className="px-5 py-2.5 text-sm bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-xl font-medium transition">
+            Close
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={submitting || !clientType || !date || !sourceResourceEmail}
+            className="px-5 py-2.5 text-sm bg-purple-600 text-white rounded-xl hover:bg-purple-700 font-medium transition disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {submitting ? 'Assigning...' : 'Assign QC'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+});
+QCAssignModal.displayName = "QCAssignModal";
+
 // --- ADD RESOURCE MODAL ---
 const AddResourceModal = React.memo(({ isOpen, onClose, onSave }) => {
   const [step, setStep] = useState(1);
@@ -743,6 +953,7 @@ export default function ResourcesPage() {
   const [showFormatInfo, setShowFormatInfo] = useState(false);
   const [viewAssignmentsModal, setViewAssignmentsModal] = useState({ isOpen: false, resource: null });
   const [assignLocationsModal, setAssignLocationsModal] = useState({ isOpen: false, resource: null });
+  const [qcAssignModal, setQcAssignModal] = useState({ isOpen: false, resource: null });
   const [editDetailsModal, setEditDetailsModal] = useState({ isOpen: false, resource: null });
   const [addResourceModal, setAddResourceModal] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
@@ -921,6 +1132,7 @@ const handleItemsPerPageChange = useCallback((e) => {
       <ViewAssignmentsModal isOpen={viewAssignmentsModal.isOpen} onClose={() => setViewAssignmentsModal({ isOpen: false, resource: null })} resource={viewAssignmentsModal.resource} />
       <EditResourceDetailsModal isOpen={editDetailsModal.isOpen} onClose={() => setEditDetailsModal({ isOpen: false, resource: null })} resource={editDetailsModal.resource} onSave={handleUpdateResourceDetails} />
       <AssignLocationsModal isOpen={assignLocationsModal.isOpen} onClose={() => setAssignLocationsModal({ isOpen: false, resource: null })} resource={assignLocationsModal.resource} onSave={handleSaveAssignments} />
+      <QCAssignModal isOpen={qcAssignModal.isOpen} onClose={() => setQcAssignModal({ isOpen: false, resource: null })} targetResource={qcAssignModal.resource} />
       <AddResourceModal isOpen={addResourceModal} onClose={() => setAddResourceModal(false)} onSave={handleAddResource} />
       
       <div id="main-content" className="flex-1 p-4">
@@ -1003,6 +1215,7 @@ const handleItemsPerPageChange = useCallback((e) => {
                         <div className="flex items-center justify-center space-x-1">
                           <button onClick={() => setEditDetailsModal({ isOpen: true, resource: res })} className="p-1.5 text-blue-600 hover:bg-blue-100 rounded-lg transition" title="Edit Details"><PencilSquareIcon className="w-5 h-5" /></button>
                           <button onClick={() => setAssignLocationsModal({ isOpen: true, resource: res })} className="p-1.5 text-green-600 hover:bg-green-100 rounded-lg transition" title="Edit Assignments"><MapPinIcon className="w-5 h-5" /></button>
+                          <button onClick={() => setQcAssignModal({ isOpen: true, resource: res })} className="p-1.5 text-purple-600 hover:bg-purple-100 rounded-lg transition" title="Assign QC"><ClipboardDocumentCheckIcon className="w-5 h-5" /></button>
                           <button onClick={() => { setConfirmDeleteResource(true); setResourceId(res._id); }} className="p-1.5 text-red-500 hover:bg-red-100 rounded-lg transition" title="Delete Resource"><TrashIcon className="w-5 h-5" /></button>
                         </div>
                       </td>

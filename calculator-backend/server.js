@@ -19,8 +19,19 @@ mongoose.set('strictQuery', false);   // or true, both silence the warning
 // const uri = "mongodb+srv://brain:Xeno%402025@myapp.global.mongocluster.cosmos.azure.com/?tls=true&authMechanism=SCRAM-SHA-256&retrywrites=false&maxIdleTimeMS=120000";
 
  async function connectDB() {
-    try { mongoose.connect(process.env.MONGODB_URI);
+    try {
+        await mongoose.connect(process.env.MONGODB_URI);
         console.log("Successfully connected to MongoDB");
+
+        // One-time cleanup: clear old auto-generated duplicate_code values in QC assignments
+        const QCAssignment = require('./models/QCAssignment');
+        const cleared = await QCAssignment.updateMany(
+          { duplicate_code: { $ne: '' }, is_deleted: false },
+          { $set: { duplicate_code: '' } }
+        );
+        if (cleared.modifiedCount > 0) {
+          console.log(`QC cleanup: cleared ${cleared.modifiedCount} old duplicate_code value(s)`);
+        }
     } catch (error) {
         console.error("Connection error:", error);
     }
@@ -70,7 +81,8 @@ app.use('/api/mro-daily-allocations', mroAllocRoutes);
 app.use('/api/verisma-daily-allocations', verismaAllocRoutes);
 app.use('/api/datavant-daily-allocations', datavantAllocRoutes);
 
-
+// QC assignments
+app.use('/api/qc-assignments', require('./routes/qc-assignment.routes'));
 
 
 // app.use('/api/auditlogs', require('./routes/auditlog.route'));
