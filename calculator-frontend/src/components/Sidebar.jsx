@@ -29,6 +29,7 @@ const navItems = [
   { name: "Resource Cases", icon: UsersIcon, path: "/admin-resource-cases" },
   {name: "Delete Requests", icon: FolderIcon, path: "/admin-delete-requests"},
   { name: "QC Dashboard", icon: ClipboardDocumentCheckIcon, path: "/qc-dashboard" },
+  { name: "QC Payout", icon: CurrencyDollarIcon, path: "/qc-payout" },
   { name: "Master Database", icon: FiDatabase, path: "/masterdatabase" },
   { name: "Settings", icon: CiSettings, path: "/settings" },
 ];

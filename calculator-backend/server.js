@@ -84,6 +84,9 @@ app.use('/api/datavant-daily-allocations', datavantAllocRoutes);
 // QC assignments
 app.use('/api/qc-assignments', require('./routes/qc-assignment.routes'));
 
+// QC Payout
+app.use('/api/qc-payout', require('./routes/qc-payout.routes'));
+
 
 // app.use('/api/auditlogs', require('./routes/auditlog.route'));
 app.get('/', (req, res) => {

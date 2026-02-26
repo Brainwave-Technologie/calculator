@@ -41,6 +41,7 @@ import ResourcePayoutCalculator from './pages/payout/ResourcePayoutCalculator';
 import CompleteLoggingBonusPayout from './pages/payout/CompleteLoggingBonusPayout';
 import PayoutDailyCasesPage from './pages/payout/PayoutDailyCasesPage';
 import DatavantDashboard from './pages/Dashboards/DatavantDashboard';
+import QCPayoutDashboard from './pages/payout/QCPayoutDashboard';
 const AppRoutes = () => {
   return (
     <Routes>
@@ -93,6 +94,7 @@ const AppRoutes = () => {
         <Route path="/payout/daily-cases" element={<PayoutDailyCasesPage />} />
         <Route path="/datavant-dashboard" element={<DatavantDashboard />} />
         <Route path="/qc-dashboard" element={<AdminQCDashboard />} />
+        <Route path="/qc-payout" element={<QCPayoutDashboard />} />
       </Route>
 
       {/* Resource routes */}

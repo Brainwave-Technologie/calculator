@@ -74,6 +74,13 @@ const VerismaAllocationPanel = ({
   const [showDeleteModal, setShowDeleteModal] = useState(null);
   const [deleteReason, setDeleteReason] = useState('');
 
+  // Batch mode state
+  const [isBatchMode, setIsBatchMode] = useState(false);
+  const [batchSize, setBatchSize] = useState(10);
+  const [batchRequestIds, setBatchRequestIds] = useState(Array(10).fill(''));
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
+  const [showBatchWarning, setShowBatchWarning] = useState(false);
+
   const getAuthHeaders = () => ({
     headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
   });
@@ -329,6 +336,75 @@ const VerismaAllocationPanel = ({
     }
   };
 
+  // Batch submit handler
+  const handleBatchSubmit = async () => {
+    if (!formData.selectedProcess) {
+      toast.error('Please select a Process');
+      return;
+    }
+    if (!formData.subproject_id || !formData.request_type) {
+      toast.error('Please fill Location and Request Type');
+      return;
+    }
+    if (!formData.requestor_type) {
+      toast.error('Please select Requestor Type');
+      return;
+    }
+    if (!dateValidation.valid) {
+      toast.error(dateValidation.message);
+      return;
+    }
+
+    const filledIds = batchRequestIds.filter(id => id.trim() !== '');
+    const emptyCount = batchRequestIds.length - filledIds.length;
+
+    if (filledIds.length === 0) {
+      toast.error('Please fill at least one Request ID');
+      return;
+    }
+
+    if (emptyCount > 0) {
+      setShowBatchWarning(true);
+      return;
+    }
+
+    await submitBatch(batchRequestIds);
+  };
+
+  const submitBatch = async (requestIds) => {
+    setBatchSubmitting(true);
+    try {
+      const response = await axios.post(`${API_URL}/verisma-daily-allocations/batch`, {
+        subproject_id: formData.subproject_id,
+        allocation_date: formDate,
+        facility: formData.facility,
+        request_type: formData.request_type,
+        requestor_type: formData.requestor_type,
+        request_ids: requestIds,
+        geography_id: selectedLocationInfo?.geography_id || geographyId,
+        geography_name: selectedLocationInfo?.geography_name || geographyName
+      }, getAuthHeaders());
+
+      const { created_count, error_count } = response.data;
+
+      if (error_count > 0) {
+        toast.error(`${created_count} entries created, ${error_count} failed`);
+      } else {
+        toast.success(`Batch submitted! ${created_count} entries created successfully.`);
+      }
+
+      // Reset batch IDs for another round (keep shared fields)
+      setBatchRequestIds(Array(batchSize).fill(''));
+      setShowBatchWarning(false);
+
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Failed to create batch entries');
+    } finally {
+      setBatchSubmitting(false);
+    }
+  };
+
   // Edit functions
   const startEdit = (allocation) => {
     setEditingId(allocation._id);
@@ -519,10 +595,11 @@ const VerismaAllocationPanel = ({
                   <label className="block text-xs font-medium text-gray-600 mb-1">
                     Process <span className="text-red-500">*</span>
                   </label>
-                  <select 
-                    value={formData.selectedProcess} 
-                    onChange={(e) => handleProcessChange(e.target.value)} 
-                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500"
+                  <select
+                    value={formData.selectedProcess}
+                    onChange={(e) => handleProcessChange(e.target.value)}
+                    disabled={isBatchMode}
+                    className={`w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500 ${isBatchMode ? 'bg-gray-100 cursor-not-allowed' : ''}`}
                   >
                     <option value="">-- Select Process --</option>
                     {availableProcesses.map(proc => (
@@ -532,17 +609,17 @@ const VerismaAllocationPanel = ({
                     ))}
                   </select>
                 </div>
-                
+
                 {/* LOCATION DROPDOWN - NOW SECOND, FILTERED BY PROCESS */}
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">
                     Location <span className="text-red-500">*</span>
                   </label>
-                  <select 
-                    value={formData.subproject_id} 
-                    onChange={(e) => handleLocationChange(e.target.value)} 
-                    disabled={!formData.selectedProcess}
-                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                  <select
+                    value={formData.subproject_id}
+                    onChange={(e) => handleLocationChange(e.target.value)}
+                    disabled={isBatchMode || !formData.selectedProcess}
+                    className={`w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500 ${isBatchMode || !formData.selectedProcess ? 'bg-gray-100 cursor-not-allowed' : ''}`}
                   >
                     <option value="">
                       {formData.selectedProcess ? '-- Select Location --' : '-- Select Process First --'}
@@ -574,18 +651,19 @@ const VerismaAllocationPanel = ({
                   />
                 </div>
                 
+                {!isBatchMode && (
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">
                     Request ID <span className="text-red-500">*</span>
                   </label>
-                  <input 
-                    type="text" 
-                    value={formData.request_id} 
-                    onChange={(e) => setFormData(prev => ({ ...prev, request_id: e.target.value }))} 
-                    placeholder="Enter ID" 
+                  <input
+                    type="text"
+                    value={formData.request_id}
+                    onChange={(e) => setFormData(prev => ({ ...prev, request_id: e.target.value }))}
+                    placeholder="Enter ID"
                     className={`w-full px-2 py-1.5 text-xs border rounded focus:ring-1 focus:ring-emerald-500 ${
                       requestIdWarning ? 'border-yellow-400 bg-yellow-50' : 'border-gray-300'
-                    }`} 
+                    }`}
                   />
                   {requestIdWarning && (
                     <p className="text-[10px] text-yellow-600 mt-0.5">
@@ -593,15 +671,17 @@ const VerismaAllocationPanel = ({
                     </p>
                   )}
                 </div>
-                
+                )}
+
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">
                     Request Type <span className="text-red-500">*</span>
                   </label>
-                  <select 
-                    value={formData.request_type} 
-                    onChange={(e) => setFormData(prev => ({ ...prev, request_type: e.target.value }))} 
-                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500"
+                  <select
+                    value={formData.request_type}
+                    onChange={(e) => setFormData(prev => ({ ...prev, request_type: e.target.value }))}
+                    disabled={isBatchMode}
+                    className={`w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500 ${isBatchMode ? 'bg-gray-100 cursor-not-allowed' : ''}`}
                   >
                     <option value="">-- Select --</option>
                     {VERISMA_REQUEST_TYPES.map(type => (
@@ -609,15 +689,16 @@ const VerismaAllocationPanel = ({
                     ))}
                   </select>
                 </div>
-                
+
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">
                     Requestor Type <span className="text-red-500">*</span>
                   </label>
-                  <select 
-                    value={formData.requestor_type} 
-                    onChange={(e) => setFormData(prev => ({ ...prev, requestor_type: e.target.value }))} 
-                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500"
+                  <select
+                    value={formData.requestor_type}
+                    onChange={(e) => setFormData(prev => ({ ...prev, requestor_type: e.target.value }))}
+                    disabled={isBatchMode}
+                    className={`w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500 ${isBatchMode ? 'bg-gray-100 cursor-not-allowed' : ''}`}
                   >
                     <option value="">-- Select --</option>
                     {VERISMA_REQUESTOR_TYPES.map(type => (
@@ -627,30 +708,186 @@ const VerismaAllocationPanel = ({
                 </div>
               </div>
               
+              {/* Batch Entry Section */}
+              {isBatchMode && (
+                <div className="mb-3 border border-purple-200 rounded-lg p-3 bg-purple-50">
+                  <div className="flex items-center justify-between mb-3">
+                    <h4 className="text-xs font-semibold text-purple-800">Batch Entry Mode</h4>
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-purple-700">Batch Size:</label>
+                      <div className="flex items-center">
+                        {batchSize > 10 && (
+                          <button
+                            onClick={() => {
+                              const newSize = batchSize - 1;
+                              setBatchSize(newSize);
+                              setBatchRequestIds(prev => prev.slice(0, newSize));
+                            }}
+                            className="px-1.5 py-1 text-xs bg-purple-200 text-purple-800 rounded-l border border-purple-300 hover:bg-purple-300 font-bold"
+                          >
+                            −
+                          </button>
+                        )}
+                        <select
+                          value={[10, 20, 30, 40, 50, 60, 70, 80, 90, 100].includes(batchSize) ? batchSize : ''}
+                          onChange={(e) => {
+                            const newSize = parseInt(e.target.value);
+                            setBatchSize(newSize);
+                            setBatchRequestIds(prev => {
+                              if (newSize > prev.length) {
+                                return [...prev, ...Array(newSize - prev.length).fill('')];
+                              }
+                              return prev.slice(0, newSize);
+                            });
+                          }}
+                          className={`px-2 py-1 text-xs border-t border-b border-purple-300 text-center w-16 ${batchSize <= 10 ? 'rounded-l border-l' : ''}`}
+                        >
+                          {![10, 20, 30, 40, 50, 60, 70, 80, 90, 100].includes(batchSize) && (
+                            <option value="">{batchSize}</option>
+                          )}
+                          {[10, 20, 30, 40, 50, 60, 70, 80, 90, 100].map(n => (
+                            <option key={n} value={n}>{n}</option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => {
+                            const newSize = Math.min(200, batchSize + 1);
+                            setBatchSize(newSize);
+                            setBatchRequestIds(prev => [...prev, '']);
+                          }}
+                          disabled={batchSize >= 200}
+                          className="px-1.5 py-1 text-xs bg-purple-200 text-purple-800 rounded-r border border-purple-300 hover:bg-purple-300 disabled:opacity-40 disabled:cursor-not-allowed font-bold"
+                        >
+                          +
+                        </button>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setIsBatchMode(false);
+                          setBatchRequestIds(Array(10).fill(''));
+                          setBatchSize(10);
+                        }}
+                        className="px-2 py-1 text-xs bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
+                      >
+                        Cancel Batch
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Shared fields summary */}
+                  <div className="flex flex-wrap gap-2 mb-3 text-[10px] text-purple-700">
+                    <span className="bg-purple-100 px-2 py-0.5 rounded">Date: {formDate}</span>
+                    <span className="bg-purple-100 px-2 py-0.5 rounded">Location: {selectedLocationInfo?.subproject_name}</span>
+                    <span className="bg-purple-100 px-2 py-0.5 rounded">Process: {selectedProcessName}</span>
+                    <span className="bg-purple-100 px-2 py-0.5 rounded">Request Type: {formData.request_type}</span>
+                    <span className="bg-purple-100 px-2 py-0.5 rounded">Requestor Type: {formData.requestor_type}</span>
+                    {formData.facility && (
+                      <span className="bg-purple-100 px-2 py-0.5 rounded">Facility: {formData.facility}</span>
+                    )}
+                  </div>
+
+                  {/* Batch Request ID Table */}
+                  <div className="max-h-80 overflow-y-auto border border-purple-200 rounded">
+                    <table className="min-w-full text-xs">
+                      <thead className="bg-purple-100 text-purple-800 sticky top-0">
+                        <tr>
+                          <th className="px-3 py-1.5 text-left w-16">S.No</th>
+                          <th className="px-3 py-1.5 text-left">Request ID</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {batchRequestIds.map((rid, idx) => (
+                          <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-purple-50/50'}>
+                            <td className="px-3 py-1 font-medium text-purple-700">{idx + 1}</td>
+                            <td className="px-3 py-1">
+                              <input
+                                type="text"
+                                value={rid}
+                                onChange={(e) => {
+                                  const updated = [...batchRequestIds];
+                                  updated[idx] = e.target.value;
+                                  setBatchRequestIds(updated);
+                                }}
+                                placeholder={`Enter Request ID ${idx + 1}`}
+                                className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-purple-500 focus:border-purple-500"
+                              />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Add More Rows */}
+                  <div className="mt-2 flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        if (batchRequestIds.length < 200) {
+                          const rowsToAdd = Math.min(10, 200 - batchRequestIds.length);
+                          setBatchRequestIds(prev => [...prev, ...Array(rowsToAdd).fill('')]);
+                          setBatchSize(prev => Math.min(prev + rowsToAdd, 200));
+                        }
+                      }}
+                      disabled={batchRequestIds.length >= 200}
+                      className="px-3 py-1 text-xs bg-purple-200 text-purple-700 rounded hover:bg-purple-300 disabled:bg-gray-200 disabled:text-gray-400"
+                    >
+                      + Add 10 More Rows
+                    </button>
+                    <span className="text-[10px] text-purple-600">
+                      {batchRequestIds.filter(r => r.trim() !== '').length} of {batchRequestIds.length} filled
+                    </span>
+                  </div>
+                </div>
+              )}
+
               {/* Form Row 2 */}
               <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 items-end">
                 <div className="col-span-2">
                   <label className="block text-xs font-medium text-gray-600 mb-1">Remark</label>
-                  <input 
-                    type="text" 
-                    value={formData.remark} 
-                    onChange={(e) => setFormData(prev => ({ ...prev, remark: e.target.value }))} 
-                    placeholder="Optional" 
-                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500" 
+                  <input
+                    type="text"
+                    value={formData.remark}
+                    onChange={(e) => setFormData(prev => ({ ...prev, remark: e.target.value }))}
+                    placeholder="Optional"
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-emerald-500"
                   />
                 </div>
-                
+
                 <div className="col-span-2 lg:col-span-6 flex justify-end gap-2">
-                  <button 
-                    onClick={handleSubmit} 
-                    disabled={submitting || !formData.selectedProcess || !formData.subproject_id || !formData.request_type || !formData.requestor_type || !formData.request_id?.trim() || !dateValidation.valid} 
-                    className="px-6 py-1.5 bg-emerald-600 text-white text-xs font-medium rounded hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
-                  >
-                    {submitting ? 'Submitting...' : 'Submit Entry'}
-                  </button>
-                  
+                  {isBatchMode ? (
+                    <button
+                      onClick={handleBatchSubmit}
+                      disabled={batchSubmitting || !formData.subproject_id || !formData.request_type || !formData.requestor_type || !dateValidation.valid}
+                      className="px-4 py-1.5 bg-purple-600 text-white text-xs font-medium rounded hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                    >
+                      {batchSubmitting ? 'Submitting Batch...' : `Submit Batch (${batchRequestIds.filter(r => r.trim()).length} entries)`}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleSubmit}
+                      disabled={submitting || !formData.selectedProcess || !formData.subproject_id || !formData.request_type || !formData.requestor_type || !formData.request_id?.trim() || !dateValidation.valid}
+                      className="px-6 py-1.5 bg-emerald-600 text-white text-xs font-medium rounded hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                    >
+                      {submitting ? 'Submitting...' : 'Submit Entry'}
+                    </button>
+                  )}
+
+                  {!isBatchMode && (
+                    <button
+                      onClick={() => {
+                        setIsBatchMode(true);
+                        setBatchSize(10);
+                        setBatchRequestIds(Array(10).fill(''));
+                      }}
+                      disabled={!formData.selectedProcess || !formData.subproject_id || !formData.request_type || !formData.requestor_type || !dateValidation.valid}
+                      className="px-4 py-1.5 bg-purple-600 text-white text-xs font-medium rounded hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                    >
+                      Create Batch
+                    </button>
+                  )}
+
                   {(formData.selectedProcess || formData.subproject_id) && (
-                    <button 
+                    <button
                       onClick={() => {
                         setFormData({
                           selectedProcess: '',
@@ -664,6 +901,9 @@ const VerismaAllocationPanel = ({
                           remark: ''
                         });
                         setSelectedLocationInfo(null);
+                        setIsBatchMode(false);
+                        setBatchRequestIds(Array(10).fill(''));
+                        setBatchSize(10);
                       }}
                       className="px-3 py-1.5 bg-gray-200 text-gray-700 text-xs font-medium rounded hover:bg-gray-300"
                     >
@@ -850,6 +1090,34 @@ const VerismaAllocationPanel = ({
           </div>
         )}
       </div>
+
+      {/* Batch Warning Modal */}
+      {showBatchWarning && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-96 p-4">
+            <h3 className="text-sm font-semibold text-yellow-800 mb-3">Some fields are not filled</h3>
+            <p className="text-xs text-gray-600 mb-3">
+              {batchRequestIds.filter(id => id.trim() === '').length} out of {batchRequestIds.length} Request ID fields are empty.
+              Only filled entries will be submitted.
+            </p>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => setShowBatchWarning(false)}
+                className="px-3 py-1.5 text-xs bg-yellow-500 text-white rounded hover:bg-yellow-600"
+              >
+                Fill
+              </button>
+              <button
+                onClick={() => submitBatch(batchRequestIds)}
+                disabled={batchSubmitting}
+                className="px-3 py-1.5 text-xs bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-300"
+              >
+                {batchSubmitting ? 'Submitting...' : 'Continue to Submit'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete Modal */}
       {showDeleteModal && (

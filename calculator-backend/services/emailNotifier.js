@@ -41,7 +41,7 @@ const sendDeleteRequestNotification = async ({
   dashboardUrl
 }) => {
   try {
-    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
       console.log('[EMAIL] SMTP not configured - skipping delete request notification');
       console.log('[EMAIL] Details:', { resourceName, clientName, allocationId, deleteReason });
       return { success: false, reason: 'SMTP not configured' };
@@ -63,7 +63,7 @@ const sendDeleteRequestNotification = async ({
     const htmlContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         <div style="background: #dc2626; color: white; padding: 16px 20px; border-radius: 8px 8px 0 0;">
-          <h2 style="margin: 0; font-size: 18px;">🗑️ Delete Request - Action Required</h2>
+          <h2 style="margin: 0; font-size: 18px;"> Delete Request - Action Required</h2>
         </div>
         
         <div style="border: 1px solid #e5e7eb; border-top: none; padding: 20px; border-radius: 0 0 8px 8px;">
@@ -116,7 +116,7 @@ const sendDeleteRequestNotification = async ({
     `;
 
     const mailOptions = {
-      from: `"Billing Dashboard" <${process.env.SMTP_USER}>`,
+      from: `"Billing Dashboard" <${process.env.EMAIL_USER}>`,
       to: adminEmails.join(', '),
       subject: `🗑️ Delete Request: ${clientName} - ${subprojectName || 'Entry'} by ${resourceName}`,
       html: htmlContent
@@ -212,17 +212,15 @@ const sendDeleteRequestNotification_Development = async ({
     `;
 
     const mailOptions = {
-      from: `"Billing Dashboard" <${process.env.SMTP_USER}>`,
+      from: `"Billing Dashboard" <${process.env.EMAIL_USER}>`,
       to: adminEmails.join(', '),
       subject: `🗑️ Delete Request: ${clientName} - ${subprojectName || 'Entry'} by ${resourceName}`,
       html: htmlContent
     };
 
-    
-    
     console.log(mailOptions);
-    
-    return { success: true, messageId: info.messageId };
+
+    return { success: true, messageId: 'dev-mode' };
 
   } catch (error) {
     console.error('[EMAIL] Failed to send delete request notification:', error.message);

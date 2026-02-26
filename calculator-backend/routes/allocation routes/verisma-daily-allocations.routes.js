@@ -320,6 +320,206 @@ router.post('/', authenticateResource, async (req, res) => {
 });
 
 /**
+ * POST: Create batch allocation entries (multiple Request IDs with shared fields)
+ */
+router.post('/batch', authenticateResource, async (req, res) => {
+  try {
+    const {
+      subproject_id,
+      allocation_date,
+      facility,
+      request_type,
+      requestor_type,
+      request_ids,
+      geography_id,
+      geography_name
+    } = req.body;
+
+    // Validate required shared fields
+    if (!subproject_id) {
+      return res.status(400).json({ message: 'Location (subproject_id) is required' });
+    }
+    if (!request_type) {
+      return res.status(400).json({ message: 'Request type is required' });
+    }
+    if (!requestor_type) {
+      return res.status(400).json({ message: 'Requestor type is required' });
+    }
+    if (!Array.isArray(request_ids) || request_ids.length === 0) {
+      return res.status(400).json({ message: 'At least one Request ID is required' });
+    }
+
+    // Filter out empty request_ids
+    const filledRequestIds = request_ids
+      .map(id => (id || '').trim())
+      .filter(id => id !== '');
+
+    if (filledRequestIds.length === 0) {
+      return res.status(400).json({ message: 'All Request ID fields are empty. Please fill at least one.' });
+    }
+
+    const resource = req.resource;
+
+    // Normalize allocation date
+    const targetDateStr = allocation_date ? normalizeDateString(allocation_date) : getPSTDateString();
+    const targetDate = new Date(targetDateStr + 'T00:00:00.000Z');
+
+    // Check if date is in the future
+    if (isFutureDate(targetDateStr)) {
+      return res.status(400).json({ message: 'Cannot add entries for future dates.' });
+    }
+
+    // Check if date is locked
+    if (isDateLocked(targetDate)) {
+      return res.status(403).json({ message: 'Cannot add entries for locked month.' });
+    }
+
+    // Get subproject details (single lookup, shared across all entries)
+    const subproject = await Subproject.findById(subproject_id);
+    if (!subproject) {
+      return res.status(404).json({ message: 'Location not found' });
+    }
+
+    // Get project details
+    const project = await Project.findById(subproject.project_id);
+
+    // Verify resource has access to this location
+    const resourceData = await Resource.findById(resource._id).lean();
+    let hasAccess = false;
+    let assignmentInfo = null;
+
+    for (const assignment of resourceData.assignments || []) {
+      if (assignment.client_name?.toLowerCase() !== 'verisma') continue;
+
+      for (const sp of assignment.subprojects || []) {
+        if (sp.subproject_id?.toString() === subproject_id.toString()) {
+          hasAccess = true;
+          assignmentInfo = {
+            geography_id: assignment.geography_id,
+            geography_name: assignment.geography_name,
+            client_id: assignment.client_id,
+            client_name: assignment.client_name,
+            project_id: assignment.project_id,
+            project_name: assignment.project_name
+          };
+          break;
+        }
+      }
+      if (hasAccess) break;
+    }
+
+    if (!hasAccess) {
+      return res.status(403).json({ message: 'You do not have access to this location' });
+    }
+
+    // Get billing rate (shared across all entries)
+    const billingRate = await getBillingRate(subproject_id, request_type);
+
+    // Calculate late log
+    const todayStr = getPSTDateString();
+    const isLateLog = targetDateStr < todayStr;
+    const daysLate = isLateLog ? Math.floor((new Date(todayStr) - new Date(targetDateStr)) / (1000 * 60 * 60 * 24)) : 0;
+
+    // Get starting SR number, then increment for each entry
+    let srNo = await getNextSrNo(resource.email, targetDate);
+
+    // Create all entries
+    const createdEntries = [];
+    const errors = [];
+
+    for (const requestId of filledRequestIds) {
+      try {
+        const allocation = new VerismaDailyAllocation({
+          sr_no: srNo,
+          allocation_date: targetDate,
+          logged_date: targetDate,
+          system_captured_date: new Date(),
+
+          resource_id: resource._id,
+          resource_name: resource.name,
+          resource_email: resource.email.toLowerCase(),
+
+          geography_id: geography_id || assignmentInfo?.geography_id,
+          geography_name: geography_name || assignmentInfo?.geography_name || 'Unknown',
+          client_id: assignmentInfo?.client_id,
+          client_name: 'Verisma',
+          project_id: assignmentInfo?.project_id || subproject.project_id,
+          project_name: assignmentInfo?.project_name || project?.name || 'Unknown',
+          subproject_id: subproject._id,
+          subproject_name: subproject.name,
+          subproject_key: `verisma|${project?.name || 'unknown'}|${subproject.name}`.toLowerCase(),
+          process: project?.name || '',
+
+          facility: facility || '',
+          request_id: requestId,
+          request_type,
+          requestor_type: requestor_type || '',
+          count: 1,
+          remark: '',
+
+          billing_rate: billingRate,
+          billing_amount: billingRate,
+          billing_rate_at_logging: billingRate,
+          payout_rate: subproject.flatrate || 0,
+
+          source: 'direct_entry',
+          is_late_log: isLateLog,
+          days_late: daysLate,
+          is_locked: false
+        });
+
+        await allocation.save();
+        createdEntries.push(allocation);
+
+        // Log activity for each entry
+        try {
+          await ActivityLog.create({
+            activity_type: 'CASE_LOGGED',
+            actor_type: 'resource',
+            actor_id: resource._id,
+            actor_email: resource.email,
+            actor_name: resource.name,
+            client_name: 'Verisma',
+            project_name: allocation.project_name,
+            subproject_name: allocation.subproject_name,
+            allocation_id: allocation._id,
+            allocation_date: allocation.allocation_date,
+            request_type,
+            details: {
+              sr_no: srNo,
+              count: 1,
+              is_late_log: isLateLog,
+              days_late: daysLate,
+              request_id: requestId
+            }
+          });
+        } catch (logErr) {
+          console.log('Activity log error (non-fatal):', logErr.message);
+        }
+
+        srNo++;
+      } catch (entryErr) {
+        errors.push({ request_id: requestId, error: entryErr.message });
+      }
+    }
+
+    res.status(201).json({
+      success: true,
+      message: `Batch created: ${createdEntries.length} entries saved${errors.length > 0 ? `, ${errors.length} failed` : ''}`,
+      total_submitted: filledRequestIds.length,
+      created_count: createdEntries.length,
+      error_count: errors.length,
+      errors: errors.length > 0 ? errors : undefined,
+      data: createdEntries
+    });
+
+  } catch (error) {
+    console.error('Verisma batch allocation error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+/**
  * GET: My allocations for a specific date
  */
 router.get('/my-allocations', authenticateResource, async (req, res) => {
